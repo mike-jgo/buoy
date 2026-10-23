@@ -1,0 +1,6 @@
+{"v":1,"blocks":[
+ {"type":"paragraph","runs":[{"text":"Groceries "},{"text":"today","b":true}]},
+ {"type":"paragraph","runs":[{"text":"slanted","i":true},{"text":" "},{"text":"under","u":true},{"text":" "},{"text":"struck","s":true}]},
+ {"type":"paragraph","runs":[{"text":"recipe","link":"https://example.com/recipe?x=1&y=2"}]},
+ {"type":"paragraph","runs":[{"text":"Back{slash} \\ done"}]}
+]}

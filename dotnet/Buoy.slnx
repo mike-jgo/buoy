@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Buoy.Core/Buoy.Core.csproj" />
+    <Project Path="src/Buoy.Windows/Buoy.Windows.csproj">
+      <Platform Project="x64" />
+    </Project>
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Buoy.Core.Tests/Buoy.Core.Tests.csproj" />
+  </Folder>
+</Solution>

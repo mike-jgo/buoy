@@ -1,0 +1,6 @@
+{"v":1,"blocks":[
+ {"type":"todo","level":0,"checked":false,"runs":[{"text":"milk"}]},
+ {"type":"todo","level":1,"checked":true,"runs":[{"text":"bread"}]},
+ {"type":"bullet","level":1,"runs":[{"text":"nested bullet"}]},
+ {"type":"bullet","level":0,"runs":[{"text":"top bullet"}]}
+]}

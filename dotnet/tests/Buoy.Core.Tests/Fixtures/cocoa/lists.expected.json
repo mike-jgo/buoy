@@ -1,0 +1,12 @@
+{"v":1,"blocks":[
+ {"type":"paragraph","runs":[{"text":"Packing"}]},
+ {"type":"bullet","level":0,"runs":[{"text":"clothes"}]},
+ {"type":"bullet","level":1,"runs":[{"text":"socks"}]},
+ {"type":"bullet","level":2,"runs":[{"text":"wool"}]},
+ {"type":"todo","level":0,"checked":false,"runs":[{"text":"pack charger"}]},
+ {"type":"todo","level":1,"checked":true,"runs":[{"text":"book flights"}]},
+ {"type":"bullet","level":0,"runs":[{"text":"a long bullet line that goes on well past the width of the panel so that it has to wrap onto a second line"}]},
+ {"type":"todo","level":0,"checked":false,"runs":[]},
+ {"type":"paragraph","runs":[{"text":"after the list"}]},
+ {"type":"paragraph","runs":[]}
+]}
