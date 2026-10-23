@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Buoy.Windows.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Grid x:Name="Root">
+        <Grid.Resources>
+            <!-- The editor sits straight on the backdrop, with no box of its own. -->
+            <SolidColorBrush x:Key="TextControlBackground" Color="Transparent" />
+            <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="Transparent" />
+            <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="Transparent" />
+            <SolidColorBrush x:Key="TextControlBackgroundDisabled" Color="Transparent" />
+            <SolidColorBrush x:Key="TextControlBorderBrush" Color="Transparent" />
+            <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="Transparent" />
+            <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="Transparent" />
+            <SolidColorBrush x:Key="TextControlBorderBrushDisabled" Color="Transparent" />
+        </Grid.Resources>
+
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Modifiers="Control" Key="W" Invoked="OnHideAccelerator" />
+        </Grid.KeyboardAccelerators>
+
+        <Grid.RowDefinitions>
+            <RowDefinition Height="44" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- The header is the window's drag area (see UpdateDragRegion). -->
+        <Grid x:Name="Header" Padding="16,0,12,0" Background="Transparent">
+            <TextBlock
+                x:Name="TitleText"
+                VerticalAlignment="Center"
+                FontSize="15"
+                FontWeight="SemiBold"
+                TextTrimming="CharacterEllipsis" />
+        </Grid>
+
+        <InfoBar
+            x:Name="Notice"
+            Grid.Row="1"
+            Margin="8,0,8,6"
+            IsClosable="True"
+            IsOpen="False" />
+
+        <RichEditBox
+            x:Name="Editor"
+            Grid.Row="2"
+            Margin="4,0,4,8"
+            AutomationProperties.Name="Note"
+            IsReadOnly="True" />
+    </Grid>
+</Window>

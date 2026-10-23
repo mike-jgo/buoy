@@ -5,8 +5,11 @@ out without this conversation. Read `CLAUDE.md` first: the Mac app's rules
 describe the behaviour this app copies, and the "critical bug pattern" notes
 apply here too.
 
-**Status (2026-10-23):** Phases 0 and 1 are done. `dotnet test` runs the core
-tests; `script/rtf-check.ps1` runs the Cocoa fixtures through RichEdit.
+**Status (2026-10-23):** Phases 0–2 are done. `dotnet test` runs the core
+tests; `script/rtf-check.ps1` runs the Cocoa fixtures through RichEdit. The
+tray icon and global hotkey are plain Win32 (CsWin32) on one hidden window,
+not a tray package. The tray menu has New Note, About and Quit; Settings…
+and Sync Now join it when Phases 4 and 6 add them.
 
 ## Decisions already made
 
