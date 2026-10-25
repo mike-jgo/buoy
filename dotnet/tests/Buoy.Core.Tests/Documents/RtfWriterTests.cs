@@ -62,6 +62,31 @@ public class RtfWriterTests
         Assert.Contains("a\\\\b\\{c\\}\\tab d\\u233?\\u-10179?\\u-8704?}", rtf);
     }
 
+    private static readonly EditorRtfStyle Style = new(FontSizePoints: 10.5, BulletHang: 6.5, TodoHang: 12.25);
+
+    [Fact]
+    public void EditorFormHangsListLinesUnderTheirText()
+    {
+        var rtf = RtfWriter.WriteEditorString(new BuoyDoc([
+            new BuoyBlock(BlockType.Bullet, [new BuoyRun("a")], level: 1),
+            new BuoyBlock(BlockType.Todo, [new BuoyRun("b")], isChecked: true),
+            BuoyBlock.Paragraph("c"),
+        ]), Style);
+
+        // First line stays at the level (li + fi = 400 twips); wrapped lines hang under the text.
+        Assert.Contains("\\pard\\plain\\f0\\fs21\\li530\\fi-130 \\u9702? a", rtf);
+        // The to-do marker is in the symbol font and followed by a space.
+        Assert.Contains("\\pard\\plain\\f0\\fs21\\li245\\fi-245 {\\f1 \\u9745?} b", rtf);
+        Assert.Contains("\\pard\\plain\\f0\\fs21 c}", rtf);
+        Assert.Contains("{\\f1\\fnil Segoe UI Symbol;}", rtf);
+    }
+
+    [Fact]
+    public void EditorFormOfAnEmptyNoteStillSetsTheFont()
+    {
+        Assert.EndsWith("\\pard\\plain\\f0\\fs21 }", RtfWriter.WriteEditorString(BuoyDoc.Empty, Style));
+    }
+
     [Fact]
     public void OutputIsPureAscii()
     {

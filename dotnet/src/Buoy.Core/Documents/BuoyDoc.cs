@@ -103,6 +103,12 @@ public sealed class BuoyDoc : IEquatable<BuoyDoc>
 
     public string PlainText => string.Join("\n", Blocks.Select(b => b.PlainText));
 
+    /// <summary>
+    /// The note as plain text with its list markers (<c>• </c>, <c>◦ </c>,
+    /// <c>☐ </c>, <c>☑ </c>), as the Mac's Copy puts it on the clipboard.
+    /// </summary>
+    public string CopyText => string.Join("\n", Blocks.Select(b => ListMarkers.EditorPrefix(b) + b.PlainText));
+
     public bool Equals(BuoyDoc? other) => other is not null && Blocks.SequenceEqual(other.Blocks);
     public override bool Equals(object? obj) => Equals(obj as BuoyDoc);
     public override int GetHashCode() => PlainText.GetHashCode();

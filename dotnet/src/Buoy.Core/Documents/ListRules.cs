@@ -69,6 +69,21 @@ public static class ListRules
     }
 
     /// <summary>
+    /// Pasted lines written as plain-text lists (<c>- item</c>, <c>* item</c>)
+    /// become bullets; everything else is left as it is.
+    /// </summary>
+    public static IEnumerable<BuoyBlock> PromotePlainBullets(IEnumerable<BuoyBlock> blocks) =>
+        blocks.Select(block =>
+        {
+            if (block.Type != BlockType.Paragraph || block.Runs.Count == 0) return block;
+            var first = block.Runs[0];
+            var text = first.Text.TrimStart();
+            if (!(text.StartsWith("- ") || text.StartsWith("* "))) return block;
+            var runs = block.Runs.Skip(1).Prepend(first with { Text = text[2..] });
+            return new BuoyBlock(BlockType.Bullet, runs);
+        });
+
+    /// <summary>
     /// Tab or Shift+Tab on a list line. Returns the new level, or null when the
     /// key isn't the list's (not a list line, or already at the limit).
     /// </summary>

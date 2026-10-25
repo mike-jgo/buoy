@@ -122,6 +122,31 @@ public sealed class NoteStoreTests : IDisposable
     }
 
     [Fact]
+    public void ContentSavedForANamedNoteLandsThereEvenAfterASwitch()
+    {
+        var a = _store.CurrentNote!.Id;
+        _store.CreateNote();
+        var b = _store.CurrentNote!.Id;
+
+        // The editor still holds A's text when B becomes current.
+        _store.SaveContent(a, Rtf("late edit to A"), Doc("late edit to A"));
+        _store.SaveContent(b, Rtf("B"), Doc("B"));
+        _clock.Advance(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(Rtf("late edit to A"), StoredContent(a));
+        Assert.Equal(Rtf("B"), StoredContent(b));
+        Assert.Equal(b, _store.CurrentNote!.Id);
+    }
+
+    [Fact]
+    public void SavingForAMissingNoteDoesNothing()
+    {
+        _store.SaveContent("missing", Rtf("x"), Doc("x"));
+        _clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.Null(SyncRow("missing"));
+    }
+
+    [Fact]
     public void SwitchingFlushesFirst()
     {
         var a = _store.CurrentNote!.Id;

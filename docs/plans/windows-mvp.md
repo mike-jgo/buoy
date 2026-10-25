@@ -5,11 +5,22 @@ out without this conversation. Read `CLAUDE.md` first: the Mac app's rules
 describe the behaviour this app copies, and the "critical bug pattern" notes
 apply here too.
 
-**Status (2026-10-23):** Phases 0–2 are done. `dotnet test` runs the core
+**Status (2026-10-23):** Phases 0–4 are done. `dotnet test` runs the core
 tests; `script/rtf-check.ps1` runs the Cocoa fixtures through RichEdit. The
 tray icon and global hotkey are plain Win32 (CsWin32) on one hidden window,
-not a tray package. The tray menu has New Note, About and Quit; Settings…
-and Sync Now join it when Phases 4 and 6 add them.
+not a tray package. The tray menu has New Note, About and Quit; Sync Now joins
+it in Phase 6.
+
+**The panel follows the Mac's design, not the generic layout first sketched
+here.** Sizes come from the Mac's `ChromeMetrics` (regular density); the
+reference is the live mock on buoy.gabemempin.me. It keeps the Mac's traffic
+lights (red hides, green toggles the tall size, yellow is greyed out until
+Harbor Mode exists). Differences, on purpose: thin desktop acrylic for the glass, the Windows accent
+colour (as the Mac follows macOS's), and Segoe UI Variable Display for the
+title. Copy is Ctrl+Enter, matching ⌘↩. Paste is native RichEdit, then the
+pasted lines are rebuilt through BuoyDoc (an awaited plain-text paste let keys
+typed after Ctrl+V land first). All Notes searches note text with a small RTF
+reader in Core (`RtfPlainText`), cached per id + `updatedAt`.
 
 ## Decisions already made
 

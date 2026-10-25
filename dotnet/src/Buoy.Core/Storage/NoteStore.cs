@@ -233,11 +233,20 @@ public sealed class NoteStore : IDisposable
     /// </summary>
     public void SaveContent(byte[] rtf, BuoyDoc doc)
     {
-        if (IsReadOnly || CurrentNote is not { } note) return;
+        if (CurrentNote is { } note) SaveContent(note.Id, rtf, doc);
+    }
+
+    /// <summary>
+    /// Records new content for <paramref name="noteId"/>, current or not. The
+    /// editor uses this form: it names the note it loaded, so an edit can never
+    /// be credited to whichever note became current in the meantime.
+    /// </summary>
+    public void SaveContent(string noteId, byte[] rtf, BuoyDoc doc)
+    {
+        if (IsReadOnly || Find(noteId) is not { } note) return;
         // Capture the target now: the write must land on the note being edited,
         // not on whatever is current when the timer fires.
-        var noteId = note.Id;
-        Schedule(ref _pendingContent, ContentSaveDelay, () => PersistContent(noteId, rtf, doc));
+        Schedule(ref _pendingContent, noteId, ContentSaveDelay, () => PersistContent(noteId, rtf, doc));
         note.ContentRtf = rtf;
         note.UpdatedAt = Now();
         RaiseChanged();
@@ -251,7 +260,7 @@ public sealed class NoteStore : IDisposable
     {
         if (IsReadOnly || CurrentNote is not { } note) return;
         var noteId = note.Id;
-        Schedule(ref _pendingTitle, TitleSaveDelay, () => PersistTitle(noteId, title));
+        Schedule(ref _pendingTitle, noteId, TitleSaveDelay, () => PersistTitle(noteId, title));
         note.Title = title;
         note.UpdatedAt = Now();
         note.AutoTitleLocked = true;
@@ -291,16 +300,26 @@ public sealed class NoteStore : IDisposable
         _pendingTitle?.Cancel();
     }
 
-    private void Schedule(ref PendingSave? slot, TimeSpan delay, Action persist)
+    /// <summary>
+    /// Replaces the pending write in <paramref name="slot"/>. One for the same
+    /// note is superseded; one for another note is written first, never dropped.
+    /// </summary>
+    private void Schedule(ref PendingSave? slot, string noteId, TimeSpan delay, Action persist)
     {
-        slot?.Cancel();
-        slot = new PendingSave(this, persist);
+        if (slot is { } previous)
+        {
+            if (previous.NoteId == noteId) previous.Cancel();
+            else previous.RunNow();
+        }
+        slot = new PendingSave(this, noteId, persist);
         slot.Start(delay);
     }
 
     /// <summary>One debounced write. It runs at most once: on its timer, or earlier through a flush.</summary>
-    private sealed class PendingSave(NoteStore store, Action persist)
+    private sealed class PendingSave(NoteStore store, string noteId, Action persist)
     {
+        public string NoteId { get; } = noteId;
+
         private ITimer? _timer;
         private bool _done;
 

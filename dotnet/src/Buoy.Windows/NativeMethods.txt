@@ -25,3 +25,8 @@ WM_CONTEXTMENU
 GetSystemMetrics
 NOTIFYICON_VERSION_4
 TRACK_POPUP_MENU_FLAGS
+GetForegroundWindow
+GetWindowThreadProcessId
+AttachThreadInput
+GetCurrentThreadId
+BringWindowToTop

@@ -58,6 +58,12 @@ public class BuoyDocTests
         Assert.Equal("Groceries today\neggs\nmilk\nrecipe", Sample.PlainText);
     }
 
+    [Fact]
+    public void CopyTextKeepsListMarkers()
+    {
+        Assert.Equal("Groceries today\n• eggs\n☑ milk\nrecipe", Sample.CopyText);
+    }
+
     [Theory]
     [InlineData("""{"v":2,"blocks":[]}""")]
     [InlineData("""{"blocks":[]}""")]

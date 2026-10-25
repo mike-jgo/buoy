@@ -26,20 +26,32 @@ public static class RichEditConversion
     {
         var story = document.GetRange(0, 0);
         story.Expand(TextRangeUnit.Story);
-        var storyEnd = story.EndPosition;
+        return new BuoyDoc(ReadParagraphs(document, 0, story.EndPosition - 1, out _, out _));
+    }
 
+    /// <summary>
+    /// The whole paragraphs that overlap [<paramref name="from"/>, <paramref name="to"/>],
+    /// and where they start and end (the end is before the last one's paragraph mark).
+    /// </summary>
+    public static List<BuoyBlock> ReadParagraphs(RichEditTextDocument document, int from, int to, out int start, out int end)
+    {
         var blocks = new List<BuoyBlock>();
-        var start = 0;
-        while (start < storyEnd)
+        start = end = from;
+        var position = from;
+        var first = true;
+        do
         {
-            var paragraph = document.GetRange(start, start);
+            var paragraph = document.GetRange(position, position);
             paragraph.Expand(TextRangeUnit.Paragraph);
-            if (paragraph.EndPosition <= start) break;
-
+            if (first) start = paragraph.StartPosition;
+            first = false;
             blocks.Add(ReadParagraph(document, paragraph));
-            start = paragraph.EndPosition;
-        }
-        return new BuoyDoc(blocks);
+            paragraph.GetText(TextGetOptions.None, out var text);
+            end = text.EndsWith('\r') ? paragraph.EndPosition - 1 : paragraph.EndPosition;
+            if (paragraph.EndPosition <= position) break;
+            position = paragraph.EndPosition;
+        } while (position <= to);
+        return blocks;
     }
 
     private static BuoyBlock ReadParagraph(RichEditTextDocument document, ITextRange paragraph)

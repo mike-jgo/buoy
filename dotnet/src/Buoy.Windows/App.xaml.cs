@@ -24,6 +24,18 @@ public partial class App : Application
     public App()
     {
         InitializeComponent();
+        // XAML reports a crash in an event handler only as 0xc000027b; keep the real exception.
+        UnhandledException += (_, e) => LogCrash(e.Exception);
+    }
+
+    private static void LogCrash(Exception exception)
+    {
+        try
+        {
+            var log = Path.Combine(BuoyPaths.Default.Root, "crash.log");
+            File.AppendAllText(log, $"{DateTimeOffset.Now:O} Buoy {Version}\n{exception}\n\n");
+        }
+        catch (IOException) { }
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
@@ -45,6 +57,7 @@ public partial class App : Application
         _notes.Changed += (_, _) => RememberCurrentNote();
 
         _window = new MainWindow(_notes, _settings, iconPath);
+        _window.QuitRequested += (_, _) => Quit();
         ReportDatabaseState(_database);
 
         _shell = new NativeShell(iconPath, "Buoy");
