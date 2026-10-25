@@ -32,7 +32,7 @@ public partial class App : Application
     {
         try
         {
-            var log = Path.Combine(BuoyPaths.Default.Root, "crash.log");
+            var log = Path.Combine(BuoyPaths.Current.Root, "crash.log");
             File.AppendAllText(log, $"{DateTimeOffset.Now:O} Buoy {Version}\n{exception}\n\n");
         }
         catch (IOException) { }
@@ -48,7 +48,7 @@ public partial class App : Application
             return;
         }
 
-        var paths = BuoyPaths.Default;
+        var paths = BuoyPaths.Current;
         var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Buoy.ico");
         _settings = new SettingsStore(paths);
         _database = NotesDatabase.Open(paths, Version);
@@ -65,7 +65,8 @@ public partial class App : Application
         _shell.HotkeyPressed += _window.TogglePanel;
         _shell.MenuItems = TrayMenu;
         RegisterHotkey();
-        LaunchAtLogin.Apply(_settings.Value.LaunchAtLogin);
+        // A test profile must never rewrite the real sign-in entry.
+        if (!paths.IsTestProfile) LaunchAtLogin.Apply(_settings.Value.LaunchAtLogin);
 
         var hotkey = _settings.Value.GlobalShortcut;
         var launchAtLogin = _settings.Value.LaunchAtLogin;
@@ -76,7 +77,7 @@ public partial class App : Application
                 hotkey = _settings.Value.GlobalShortcut;
                 RegisterHotkey();
             }
-            if (_settings.Value.LaunchAtLogin != launchAtLogin)
+            if (_settings.Value.LaunchAtLogin != launchAtLogin && !paths.IsTestProfile)
             {
                 launchAtLogin = _settings.Value.LaunchAtLogin;
                 LaunchAtLogin.Apply(launchAtLogin);

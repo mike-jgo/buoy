@@ -18,7 +18,9 @@ public static class Program
 
         if (!args.Contains("--rtf-check"))
         {
-            var main = AppInstance.FindOrRegisterForKey("Buoy");
+            // A test profile (BUOY_DATA_DIR) is its own instance, alongside the real one.
+            var paths = Buoy.Core.Storage.BuoyPaths.Current;
+            var main = AppInstance.FindOrRegisterForKey(paths.IsTestProfile ? $"Buoy:{paths.Root.ToLowerInvariant()}" : "Buoy");
             if (!main.IsCurrent)
             {
                 var activation = AppInstance.GetCurrent().GetActivatedEventArgs();

@@ -38,7 +38,10 @@ internal sealed class AllNotesPanel : UserControl
     public event Action<Note>? DeleteRequested;
     public event Action? Closed;
 
-    public bool IsOpen => Visibility == Visibility.Visible;
+    /// <summary>True from the moment it starts opening until it starts closing (not while it fades out).</summary>
+    public bool IsOpen { get; private set; }
+
+    private static readonly TimeSpan FadeDuration = TimeSpan.FromSeconds(0.16);
 
     /// <summary>Escape in the search field clears it before closing; the window asks so it can leave that to the field.</summary>
     public bool IsSearchField(object? element) => ReferenceEquals(element, _search);
@@ -49,8 +52,6 @@ internal sealed class AllNotesPanel : UserControl
         Visibility = Visibility.Collapsed;
         VerticalAlignment = VerticalAlignment.Top;
         ApplyThemeBrushes();
-        Shadow = new ThemeShadow();
-        Translation = new Vector3(0, 0, 32);
 
         var title = new TextBlock { Text = "All Notes", FontSize = 14, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
         var close = new Button
@@ -92,7 +93,13 @@ internal sealed class AllNotesPanel : UserControl
         layout.Children.Add(list);
         layout.Children.Add(_empty);
         _card.Child = layout;
-        Content = _card;
+        // The shadow is a composition drop shadow on a layer behind the card, not
+        // ThemeShadow: ThemeShadow needs the card raised with a Z translation, and
+        // that shifted its hit-testing a row (32px) above where it was drawn, so
+        // hovering or clicking a note landed on the one above it.
+        var shadowLayer = new Grid { IsHitTestVisible = false };
+        Content = new Grid { Children = { shadowLayer, _card } };
+        AttachShadow(shadowLayer);
 
         _notes.Changed += (_, _) => { if (IsOpen) Rebuild(); };
         // The card's own brushes follow its theme too, from the moment it is in the tree.
@@ -101,6 +108,24 @@ internal sealed class AllNotesPanel : UserControl
         {
             ApplyThemeBrushes();
             if (IsOpen) Rebuild();
+        };
+    }
+
+    private static void AttachShadow(FrameworkElement layer)
+    {
+        var compositor = Motion.VisualOf(layer).Compositor;
+        var shadow = compositor.CreateDropShadow();
+        shadow.BlurRadius = 24;
+        shadow.Opacity = 0.3f;
+        shadow.Offset = new Vector3(0, 8, 0);
+        var sprite = compositor.CreateSpriteVisual();
+        sprite.Shadow = shadow;
+        Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.SetElementChildVisual(layer, sprite);
+        // Inset by the corner radius, so the square shadow never pokes out past the rounded corners.
+        layer.SizeChanged += (_, e) =>
+        {
+            sprite.Size = new Vector2((float)e.NewSize.Width - 8, (float)e.NewSize.Height - 8);
+            sprite.Offset = new Vector3(4, 4, 0);
         };
     }
 
@@ -118,16 +143,22 @@ internal sealed class AllNotesPanel : UserControl
 
     public void Open()
     {
+        IsOpen = true;
         _search.Text = "";
         Rebuild();
+        // Fades in (Mac: 0.16s ease-out); a fade is fine under reduced motion too.
+        Motion.SetOpacity(this, 0);
         Visibility = Visibility.Visible;
+        Motion.Fade(this, 1, FadeDuration);
         _search.Focus(FocusState.Programmatic);
     }
 
     public void Close()
     {
         if (!IsOpen) return;
-        Visibility = Visibility.Collapsed;
+        IsOpen = false;
+        // Collapse only once faded out, and only if it wasn't reopened meanwhile.
+        Motion.Fade(this, 0, FadeDuration, () => { if (!IsOpen) Visibility = Visibility.Collapsed; });
         Closed?.Invoke();
     }
 

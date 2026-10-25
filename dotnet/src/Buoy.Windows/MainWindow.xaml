@@ -207,11 +207,14 @@
             IsClosable="True"
             IsOpen="False" />
 
-        <RichEditBox
-            x:Name="EditorBox"
-            Grid.Row="4"
-            Margin="0,4,0,0"
-            AutomationProperties.Name="Note" />
+        <!-- The note. Clipped so a sliding note (previous/next) stays inside the glass;
+             the snapshot is the outgoing note during that slide, and the effects layer
+             holds the to-do pop. -->
+        <Grid x:Name="EditorHost" Grid.Row="4" Margin="0,4,0,0">
+            <RichEditBox x:Name="EditorBox" AutomationProperties.Name="Note" />
+            <Image x:Name="SlideSnapshot" IsHitTestVisible="False" Stretch="None" HorizontalAlignment="Left" VerticalAlignment="Top" Visibility="Collapsed" />
+            <Canvas x:Name="Effects" IsHitTestVisible="False" />
+        </Grid>
 
         <!-- Footer (Mac: FooterView). -->
         <Grid x:Name="Footer" Grid.Row="5">
@@ -293,11 +296,7 @@
             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
             BorderThickness="1"
             CornerRadius="14"
-            IsHitTestVisible="False"
-            Opacity="0">
-            <Border.OpacityTransition>
-                <ScalarTransition />
-            </Border.OpacityTransition>
+            IsHitTestVisible="False">
             <StackPanel Orientation="Horizontal" Spacing="6">
                 <FontIcon x:Name="ToastIcon" FontSize="12" Glyph="&#xE73E;" />
                 <TextBlock x:Name="ToastText" FontSize="12" />

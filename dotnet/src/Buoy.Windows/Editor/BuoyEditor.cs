@@ -41,6 +41,19 @@ internal sealed class BuoyEditor
 
     public event EventHandler? ContentChanged;
 
+    /// <summary>A to-do box was clicked: where it is (in the box's own coordinates) and whether it's now checked.</summary>
+    public event Action<Rect, bool>? TodoToggled;
+
+    /// <summary>Converts the box's position from RichEdit's client pixels to the RichEditBox's coordinates and reports it.</summary>
+    private void ReportToggle(ITextRange box, bool isChecked)
+    {
+        if (TodoToggled is null || _textArea is null) return;
+        box.GetRect(PointOptions.ClientCoordinates, out var pixels, out _);
+        var scale = _box.XamlRoot?.RasterizationScale ?? 1;
+        var origin = _textArea.TransformToVisual(_box).TransformPoint(new Point(pixels.X / scale, pixels.Y / scale));
+        TodoToggled(new Rect(origin.X, origin.Y, pixels.Width / scale, pixels.Height / scale), isChecked);
+    }
+
     private RichEditTextDocument Document => _box.Document;
 
     public BuoyEditor(RichEditBox box, NoteStore notes, double fontSize)
@@ -521,6 +534,7 @@ internal sealed class BuoyEditor
 
             var toggled = glyph[0] == ListMarkers.Unchecked ? ListMarkers.Checked : ListMarkers.Unchecked;
             Edit(() => box.SetText(TextSetOptions.None, toggled.ToString()));
+            ReportToggle(box, toggled == ListMarkers.Checked);
             return;
         }
     }

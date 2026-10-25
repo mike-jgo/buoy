@@ -1,3 +1,4 @@
+using System.Numerics;
 using Buoy.Core.Documents;
 using Buoy.Core.Settings;
 using Buoy.Core.Storage;
@@ -9,6 +10,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
 using Windows.System;
@@ -77,6 +79,9 @@ public sealed partial class MainWindow : Window
         Root.Loaded += (_, _) => UpdateDragRegion();
         Root.PreviewKeyDown += OnShortcut;
         _toastTimer.Tick += (_, _) => HideToast();
+        Motion.SetOpacity(Toast, 0);
+        EditorHost.SizeChanged += (_, e) =>
+            EditorHost.Clip = new RectangleGeometry { Rect = new global::Windows.Foundation.Rect(0, 0, e.NewSize.Width, e.NewSize.Height) };
 
         // Red hides, green toggles the tall size; yellow (Harbor Mode) stays greyed out until it exists.
         _lights = new TrafficLights(close: HidePanel, minimize: null, expand: ToggleExpanded)
@@ -102,6 +107,7 @@ public sealed partial class MainWindow : Window
 
         _editor = new BuoyEditor(EditorBox, notes, settings.Value.FontSize);
         _editor.ContentChanged += (_, _) => UpdateInfo();
+        _editor.TodoToggled += PopTodo;
         Toolbar.IsHitTestVisible = !notes.IsReadOnly;
         Toolbar.Opacity = notes.IsReadOnly ? 0.5 : 1;
         TitleBox.IsReadOnly = notes.IsReadOnly;
@@ -238,7 +244,138 @@ public sealed partial class MainWindow : Window
         var position = AppWindow.Position;
         var target = _expanded ? InitialSize.Height * scale : Math.Min(780 * scale, area.Y + area.Height - position.Y);
         _expanded = !_expanded;
-        AppWindow.Resize(new SizeInt32(AppWindow.Size.Width, (int)target));
+        AnimateHeight((int)target);
+    }
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _heightTimer;
+
+    /// <summary>
+    /// Grows or shrinks the window to <paramref name="target"/> pixels over 0.25s,
+    /// easing in and out, with its top edge still (the Mac's animateHeight).
+    /// Instant under reduced motion: a window either travels or it doesn't.
+    /// </summary>
+    private void AnimateHeight(int target)
+    {
+        _heightTimer?.Stop();
+        var start = AppWindow.Size.Height;
+        var width = AppWindow.Size.Width;
+        if (Motion.IsReduced || start == target)
+        {
+            AppWindow.Resize(new SizeInt32(width, target));
+            return;
+        }
+
+        var duration = TimeSpan.FromSeconds(0.25);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromMilliseconds(8);
+        timer.Tick += (_, _) =>
+        {
+            var t = Math.Min(1, clock.Elapsed / duration);
+            var eased = t < 0.5 ? 4 * t * t * t : 1 - Math.Pow(-2 * t + 2, 3) / 2; // ease in-out
+            AppWindow.Resize(new SizeInt32(width, (int)Math.Round(start + (target - start) * eased)));
+            if (t >= 1) timer.Stop();
+        };
+        _heightTimer = timer;
+        timer.Start();
+    }
+
+    private bool _sliding;
+
+    /// <summary>
+    /// Previous/next note: the outgoing note slides off one side as the new one
+    /// slides in from the other (the Mac's slide, spring 0.3 / 0.8). The outgoing
+    /// note is a snapshot, since there is one editor. No slide under reduced motion.
+    /// </summary>
+    private async void SlideToNote(bool forward)
+    {
+        var from = _notes.CurrentNote?.Id;
+        if (Motion.IsReduced || _sliding || EditorHost.ActualWidth <= 0)
+        {
+            if (forward) _notes.NextNote(); else _notes.PreviousNote();
+            return;
+        }
+
+        _sliding = true;
+        try
+        {
+            var snapshot = new RenderTargetBitmap();
+            await snapshot.RenderAsync(EditorBox);
+            SlideSnapshot.Source = snapshot;
+            SlideSnapshot.Width = EditorBox.ActualWidth;
+            SlideSnapshot.Height = EditorBox.ActualHeight;
+            SlideSnapshot.Stretch = Stretch.Fill;
+
+            if (forward) _notes.NextNote(); else _notes.PreviousNote();
+            if (_notes.CurrentNote?.Id == from) return; // only one note
+
+            var width = (float)EditorHost.ActualWidth;
+            var direction = forward ? 1 : -1;
+            SlideSnapshot.Visibility = Visibility.Visible;
+            Motion.SlideIn(SlideSnapshot, Vector3.Zero, 0.3, 0.8);
+            Motion.SlideOut(SlideSnapshot, new Vector3(-direction * width, 0, 0), 0.3, 0.8, () =>
+            {
+                SlideSnapshot.Visibility = Visibility.Collapsed;
+                SlideSnapshot.Source = null;
+            });
+            Motion.SlideIn(EditorBox, new Vector3(direction * width, 0, 0), 0.3, 0.8);
+        }
+        finally
+        {
+            _sliding = false;
+        }
+        _editor.Focus();
+    }
+
+    /// <summary>
+    /// A to-do box changing: an accent check pops in (scale 0.55 to 1, overshooting)
+    /// over the new box and fades, or the filled box shrinks away when unchecked,
+    /// after the Mac's 0.32s checkbox animation. The glyph in the note changes at
+    /// once underneath. Nothing under reduced motion, as on the Mac.
+    /// </summary>
+    private void PopTodo(global::Windows.Foundation.Rect box, bool isChecked)
+    {
+        if (Motion.IsReduced) return;
+        var origin = EditorBox.TransformToVisual(Effects).TransformPoint(new global::Windows.Foundation.Point(box.X, box.Y));
+        var size = Math.Max(box.Width, box.Height);
+        var icon = new FontIcon
+        {
+            Glyph = "",
+            FontSize = size,
+            Foreground = ThemeBrushes.Get<Brush>(Root, "AccentFillColorDefaultBrush"),
+            Width = size,
+            Height = size,
+        };
+        Canvas.SetLeft(icon, origin.X);
+        Canvas.SetTop(icon, origin.Y + (box.Height - size) / 2);
+        Effects.Children.Add(icon);
+        icon.UpdateLayout();
+
+        var visual = Motion.VisualOf(icon);
+        var compositor = visual.Compositor;
+        visual.CenterPoint = new Vector3((float)size / 2, (float)size / 2, 0);
+        var scale = compositor.CreateVector3KeyFrameAnimation();
+        if (isChecked)
+        {
+            visual.Scale = new Vector3(0.55f, 0.55f, 1);
+            scale.InsertKeyFrame(0.6f, Vector3.One, Motion.EaseOutBack(compositor));
+            scale.InsertKeyFrame(1, Vector3.One);
+        }
+        else
+        {
+            scale.InsertKeyFrame(1, new Vector3(0.55f, 0.55f, 1), Motion.EaseOut(compositor));
+        }
+        scale.Duration = TimeSpan.FromSeconds(0.32);
+        visual.StartAnimation("Scale", scale);
+
+        var fade = compositor.CreateScalarKeyFrameAnimation();
+        fade.InsertKeyFrame(isChecked ? 0.6f : 0f, 1);
+        fade.InsertKeyFrame(1, 0);
+        fade.Duration = TimeSpan.FromSeconds(0.32);
+        var batch = compositor.CreateScopedBatch(Microsoft.UI.Composition.CompositionBatchTypes.Animation);
+        visual.StartAnimation("Opacity", fade);
+        batch.End();
+        batch.Completed += (_, _) => DispatcherQueue.TryEnqueue(() => Effects.Children.Remove(icon));
     }
 
     private static FrameworkElement? FindByName(DependencyObject root, string name)
@@ -323,8 +460,13 @@ public sealed partial class MainWindow : Window
         });
     }
 
-    private void OnInfo(object sender, RoutedEventArgs e) =>
+    private void OnInfo(object sender, RoutedEventArgs e)
+    {
         _settings.Update(s => s.FooterInfo = (FooterInfo)(((int)s.FooterInfo + 1) % Enum.GetValues<FooterInfo>().Length));
+        // The new readout crossfades in (Mac: 0.12s ease-in-out).
+        Motion.SetOpacity(InfoText, 0);
+        Motion.Fade(InfoText, 1, Motion.Crossfade);
+    }
 
     private void CopyNote()
     {
@@ -370,7 +512,10 @@ public sealed partial class MainWindow : Window
     {
         ToastText.Text = text;
         ToastIcon.Glyph = glyph;
-        Toast.Opacity = 1;
+        Toast.UpdateLayout(); // the pop scales about its bottom centre, which depends on the new text
+        // Grows up out of the footer with a small overshoot (Mac: BuoyMotion.pillPop + pillAnimation).
+        Motion.SetOpacity(Toast, 0);
+        Motion.PopIn(Toast, from: 0.5f, anchor: new Vector2(0.5f, 1), response: 0.34, damping: 0.68);
         _toastTimer.Stop();
         _toastTimer.Start();
     }
@@ -378,7 +523,7 @@ public sealed partial class MainWindow : Window
     private void HideToast()
     {
         _toastTimer.Stop();
-        Toast.Opacity = 0;
+        Motion.PopOut(Toast, to: 0.8f, anchor: new Vector2(0.5f, 1));
     }
 
     /// <summary>Shows a lasting message above the note, such as a hotkey that couldn't be registered.</summary>
@@ -466,8 +611,8 @@ public sealed partial class MainWindow : Window
             (VirtualKey.Enter, false) => CopyNote,
             (VirtualKey.K, false) => ShowLinkDialog,
             (VirtualKey.D, false) => DeleteCurrentNote,
-            (VirtualKey.PageUp, false) => _notes.PreviousNote,
-            (VirtualKey.PageDown, false) => _notes.NextNote,
+            (VirtualKey.PageUp, false) => () => SlideToNote(forward: false),
+            (VirtualKey.PageDown, false) => () => SlideToNote(forward: true),
             ((VirtualKey)0xBC, false) => () => SettingsButton.Flyout.ShowAt(SettingsButton), // Ctrl+,
             _ => null,
         };
