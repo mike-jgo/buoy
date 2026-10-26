@@ -1,5 +1,6 @@
 using System.Numerics;
 using Buoy.Core.Documents;
+using Buoy.Core.Harbor;
 using Buoy.Core.Settings;
 using Buoy.Core.Storage;
 using Buoy.Windows.Editor;
@@ -38,6 +39,7 @@ public sealed partial class MainWindow : Window
     private readonly AllNotesPanel _allNotes;
     private readonly TrafficLights _lights;
     private bool _expanded;
+    private readonly WindowSpring _windowSpring;
     private readonly DispatcherTimer _toastTimer = new() { Interval = ToastDuration };
     private bool _positioned;
     private bool _closing;
@@ -56,6 +58,7 @@ public sealed partial class MainWindow : Window
         AppWindow.SetIcon(iconPath);
         AppWindow.IsShownInSwitchers = false;
 
+        _windowSpring = new WindowSpring(AppWindow);
         _presenter = OverlappedPresenter.Create();
         _presenter.SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false);
         _presenter.IsMaximizable = false;
@@ -65,7 +68,7 @@ public sealed partial class MainWindow : Window
         if (GlassBackdrop.IsSupported)
             SystemBackdrop = new GlassBackdrop();
         else
-            Root.Background = (Brush)Application.Current.Resources["SolidBackgroundFillColorBaseBrush"];
+            WindowRoot.Background = (Brush)Application.Current.Resources["SolidBackgroundFillColorBaseBrush"];
 
         // Alt+F4 hides, like the close button.
         AppWindow.Closing += (_, args) =>
@@ -77,14 +80,14 @@ public sealed partial class MainWindow : Window
         Header.SizeChanged += (_, _) => UpdateDragRegion();
         HeaderButtons.SizeChanged += (_, _) => UpdateDragRegion();
         Root.Loaded += (_, _) => UpdateDragRegion();
-        Root.PreviewKeyDown += OnShortcut;
+        WindowRoot.PreviewKeyDown += OnShortcut;
         _toastTimer.Tick += (_, _) => HideToast();
         Motion.SetOpacity(Toast, 0);
         EditorHost.SizeChanged += (_, e) =>
             EditorHost.Clip = new RectangleGeometry { Rect = new global::Windows.Foundation.Rect(0, 0, e.NewSize.Width, e.NewSize.Height) };
 
-        // Red hides, green toggles the tall size; yellow (Harbor Mode) stays greyed out until it exists.
-        _lights = new TrafficLights(close: HidePanel, minimize: null, expand: ToggleExpanded)
+        // Red hides, yellow folds into Harbor Mode, green toggles the tall size.
+        _lights = new TrafficLights(close: HidePanel, minimize: ToggleHarbor, expand: ToggleExpanded)
         {
             Margin = new Thickness(9, 14, 0, 0), // 15pt from the glass edge, centred in the 28pt row
             VerticalAlignment = VerticalAlignment.Top,
@@ -127,6 +130,11 @@ public sealed partial class MainWindow : Window
         SettingsFlyout.Content = new SettingsPanel(settings, () => QuitRequested?.Invoke(this, EventArgs.Empty));
 
         _notes.Changed += (_, _) => ShowCurrentNote();
+        _notes.Changed += (_, _) => UpdateHarbor();
+        _pillTitle = new MarqueeText();
+        PillTitleLane.Children.Add(_pillTitle);
+        Pill.SizeChanged += (_, _) => UpdateDragRegion();
+        WindowRoot.ActualThemeChanged += (_, _) => UpdateHarbor();
         _settings.Changed += (_, _) => ApplySettings();
         ApplySettings();
         ShowCurrentNote();
@@ -150,7 +158,8 @@ public sealed partial class MainWindow : Window
         AppWindow.Show(activateWindow: true);
         Activate();
         TakeForeground();
-        _editor.Focus();
+        if (_minimized) PillRestore.Focus(FocusState.Programmatic);
+        else _editor.Focus();
     }
 
     public void HidePanel()
@@ -222,13 +231,28 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void UpdateDragRegion()
     {
-        if (Root.XamlRoot is null) return;
-        var scale = Root.XamlRoot.RasterizationScale;
-        var left = _lights.TransformToVisual(Root).TransformPoint(default).X + _lights.ActualWidth;
-        var right = HeaderButtons.TransformToVisual(Root).TransformPoint(default).X;
-        var region = new RectInt32(
-            (int)(left * scale), 0,
-            (int)(Math.Max(0, right - left) * scale), (int)((Header.ActualHeight + Root.Padding.Top) * scale));
+        if (WindowRoot.XamlRoot is null) return;
+        var scale = WindowRoot.XamlRoot.RasterizationScale;
+        RectInt32 region;
+        if (_minimized)
+        {
+            // The whole pill drags, up to its buttons.
+            var buttons = new FrameworkElement[] { PillPause, PillStop, PillRestore }
+                .Where(b => b.Visibility == Visibility.Visible)
+                .Select(b => b.TransformToVisual(WindowRoot).TransformPoint(default).X)
+                .DefaultIfEmpty(WindowRoot.ActualWidth)
+                .Min();
+            region = new RectInt32(0, 0, (int)(buttons * scale), (int)(WindowRoot.ActualHeight * scale));
+        }
+        else
+        {
+            var left = _lights.TransformToVisual(WindowRoot).TransformPoint(default).X + _lights.ActualWidth;
+            var right = HeaderButtons.TransformToVisual(WindowRoot).TransformPoint(default).X;
+            var bottom = Header.TransformToVisual(WindowRoot).TransformPoint(default).Y + Header.ActualHeight;
+            region = new RectInt32(
+                (int)(left * scale), 0,
+                (int)(Math.Max(0, right - left) * scale), (int)(Math.Max(0, bottom) * scale));
+        }
         InputNonClientPointerSource.GetForWindowId(AppWindow.Id)
             .SetRegionRects(NonClientRegionKind.Caption, [region]);
     }
@@ -247,37 +271,16 @@ public sealed partial class MainWindow : Window
         AnimateHeight((int)target);
     }
 
-    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _heightTimer;
-
     /// <summary>
-    /// Grows or shrinks the window to <paramref name="target"/> pixels over 0.25s,
-    /// easing in and out, with its top edge still (the Mac's animateHeight).
-    /// Instant under reduced motion: a window either travels or it doesn't.
+    /// Grows or shrinks the window to <paramref name="target"/> pixels with its top
+    /// edge still, on a critically damped spring (response 0.3, close to the Mac's
+    /// 0.25s ease-in-out). Clicking green again mid-way re-aims from where the
+    /// window is and keeps its speed, rather than restarting from rest.
     /// </summary>
     private void AnimateHeight(int target)
     {
-        _heightTimer?.Stop();
-        var start = AppWindow.Size.Height;
-        var width = AppWindow.Size.Width;
-        if (Motion.IsReduced || start == target)
-        {
-            AppWindow.Resize(new SizeInt32(width, target));
-            return;
-        }
-
-        var duration = TimeSpan.FromSeconds(0.25);
-        var clock = System.Diagnostics.Stopwatch.StartNew();
-        var timer = DispatcherQueue.CreateTimer();
-        timer.Interval = TimeSpan.FromMilliseconds(8);
-        timer.Tick += (_, _) =>
-        {
-            var t = Math.Min(1, clock.Elapsed / duration);
-            var eased = t < 0.5 ? 4 * t * t * t : 1 - Math.Pow(-2 * t + 2, 3) / 2; // ease in-out
-            AppWindow.Resize(new SizeInt32(width, (int)Math.Round(start + (target - start) * eased)));
-            if (t >= 1) timer.Stop();
-        };
-        _heightTimer = timer;
-        timer.Start();
+        var frame = _windowSpring.Target;
+        _windowSpring.AnimateTo(new RectInt32(frame.X, frame.Y, frame.Width, target));
     }
 
     private bool _sliding;
@@ -395,7 +398,7 @@ public sealed partial class MainWindow : Window
     {
         var settings = _settings.Value;
         _presenter.IsAlwaysOnTop = settings.AlwaysOnTop;
-        Root.RequestedTheme = settings.Theme switch
+        WindowRoot.RequestedTheme = settings.Theme switch
         {
             AppTheme.Light => ElementTheme.Light,
             AppTheme.Dark => ElementTheme.Dark,
@@ -427,6 +430,7 @@ public sealed partial class MainWindow : Window
     {
         if (_showingTitle || _notes.CurrentNote is not { } note || TitleBox.Text == note.Title) return;
         _notes.SaveTitle(TitleBox.Text);
+        if (_timers.TryGetValue(note.Id, out var timer) && timer.IsFinished) timer.Stop();
     }
 
     /// <summary>Return in the title moves on to the note, as on the Mac.</summary>
@@ -581,6 +585,246 @@ public sealed partial class MainWindow : Window
         flyout.ShowAt(LinkButton);
     }
 
+    // MARK: - Harbor Mode
+
+    private const double PillHeight = 56;
+    private const double PillMinimumWidth = 216;
+    private const double PillMaximumWidth = 292;
+    private const double PillTimerWidth = 246;
+    private static readonly TimeSpan HarborFade = TimeSpan.FromSeconds(0.16);
+
+    private readonly Dictionary<string, HarborCountdown> _timers = [];
+    private readonly MarqueeText _pillTitle;
+    private bool _minimized;
+    private RectInt32? _lastFullFrame;
+
+    private void ToggleHarbor()
+    {
+        if (_minimized) RestoreFromHarbor();
+        else FoldIntoHarbor();
+    }
+
+    /// <summary>
+    /// Folds the panel into the pill (the Mac's enterMinimizedMode). The window
+    /// shrinks on a spring toward the panel's top edge, centred, or its bottom
+    /// edge when the panel sits in the lower third of the screen. The panel
+    /// keeps its size and is clipped as the window closes over it (never reflowed
+    /// per frame), fading out while the pill fades and scales in. Folding again
+    /// mid-restore re-aims the same springs, so spam-toggling bends instead of
+    /// jumping, and the restore size is only ever taken from a window at rest.
+    /// </summary>
+    private void FoldIntoHarbor()
+    {
+        if (_minimized) return;
+        _allNotes.Close();
+        _notes.FlushPendingSaves();
+        if (!_windowSpring.IsMoving) _lastFullFrame = CurrentFrame();
+        var from = CurrentFrame();
+        _minimized = true;
+
+        if (_notes.CurrentNote is { } note) TimerFor(note.Id).Start(note.Title);
+
+        var scale = Scale();
+        var area = WorkArea();
+        var bottomAnchored = from.Y + from.Height / 2.0 > area.Y + area.Height * 0.65;
+        var size = new SizeInt32((int)Math.Round(PillWidth() * scale), (int)Math.Round(PillHeight * scale));
+        var target = Clamp(new RectInt32(
+            from.X + (from.Width - size.Width) / 2,
+            bottomAnchored ? from.Y + from.Height - size.Height : from.Y,
+            size.Width, size.Height), area);
+
+        _presenter.IsResizable = false;
+        _presenter.PreferredMinimumWidth = null;
+        _presenter.PreferredMinimumHeight = null;
+
+        // The outgoing panel holds its size, pinned to the edge the window keeps.
+        Hold(Root, from.Width / scale, from.Height / scale, bottomAnchored);
+        Motion.Fade(Root, 0, HarborFade);
+
+        Hold(Pill, size.Width / scale, PillHeight, bottomAnchored);
+        if (Pill.Visibility == Visibility.Collapsed) Motion.SetOpacity(Pill, 0);
+        Pill.Visibility = Visibility.Visible;
+        UpdateHarbor();
+        Pill.UpdateLayout();
+        Motion.PopIn(Pill, from: 0.96f, anchor: new Vector2(0.5f, bottomAnchored ? 1 : 0), response: 0.3, damping: 1.0);
+        PillRestore.Focus(FocusState.Programmatic);
+
+        _windowSpring.AnimateTo(target, () =>
+        {
+            if (!_minimized) return;
+            Root.Visibility = Visibility.Collapsed;
+            Release(Root);
+            UpdateDragRegion();
+        });
+        UpdateDragRegion();
+    }
+
+    /// <summary>
+    /// Unfolds back to the panel's size from before the fold (the Mac's
+    /// exitMinimizedMode): centred on the pill, growing down, or up if it would
+    /// run off the bottom of the screen. The panel is laid out once at its final
+    /// size and revealed by the growing window.
+    /// </summary>
+    private void RestoreFromHarbor()
+    {
+        if (!_minimized) return;
+        _minimized = false;
+        var from = CurrentFrame();
+        var scale = Scale();
+        var area = WorkArea();
+        var full = _lastFullFrame ?? new RectInt32(0, 0, (int)(InitialSize.Width * scale), (int)(InitialSize.Height * scale));
+        var x = from.X + (from.Width - full.Width) / 2;
+        var y = from.Y;
+        var growsUp = y + full.Height > area.Y + area.Height;
+        if (growsUp) y = from.Y + from.Height - full.Height;
+        var target = Clamp(new RectInt32(x, y, full.Width, full.Height), area);
+
+        Hold(Root, full.Width / scale, full.Height / scale, growsUp);
+        if (Root.Visibility == Visibility.Collapsed) Motion.SetOpacity(Root, 0);
+        Root.Visibility = Visibility.Visible;
+        Motion.Fade(Root, 1, HarborFade);
+        Motion.Fade(Pill, 0, TimeSpan.FromSeconds(0.12), () => { if (!_minimized) Pill.Visibility = Visibility.Collapsed; });
+        UpdateHarbor();
+
+        _windowSpring.AnimateTo(target, () =>
+        {
+            if (_minimized) return;
+            Release(Root);
+            _presenter.IsResizable = true;
+            var s = Scale();
+            _presenter.PreferredMinimumWidth = (int)(MinimumSize.Width * s);
+            _presenter.PreferredMinimumHeight = (int)(MinimumSize.Height * s);
+            UpdateDragRegion();
+            _editor.Focus();
+        });
+        UpdateDragRegion();
+    }
+
+    /// <summary>Pins an element at a fixed size against one edge, so the window can clip it instead of reflowing it.</summary>
+    private static void Hold(FrameworkElement element, double width, double height, bool bottom)
+    {
+        element.Width = width;
+        element.Height = height;
+        element.HorizontalAlignment = HorizontalAlignment.Center;
+        element.VerticalAlignment = bottom ? VerticalAlignment.Bottom : VerticalAlignment.Top;
+    }
+
+    private static void Release(FrameworkElement element)
+    {
+        element.Width = double.NaN;
+        element.Height = double.NaN;
+        element.HorizontalAlignment = HorizontalAlignment.Stretch;
+        element.VerticalAlignment = VerticalAlignment.Stretch;
+    }
+
+    private RectInt32 CurrentFrame() => new(AppWindow.Position.X, AppWindow.Position.Y, AppWindow.Size.Width, AppWindow.Size.Height);
+
+    private RectInt32 WorkArea() => DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
+
+    private static RectInt32 Clamp(RectInt32 frame, RectInt32 area)
+    {
+        var width = Math.Min(frame.Width, area.Width);
+        var height = Math.Min(frame.Height, area.Height);
+        var x = Math.Clamp(frame.X, area.X, area.X + area.Width - width);
+        var y = Math.Clamp(frame.Y, area.Y, area.Y + area.Height - height);
+        return new RectInt32(x, y, width, height);
+    }
+
+    /// <summary>The pill's width in DIPs: fits the title (Mac: minimizedWindowWidth), or the timer's fixed width.</summary>
+    private double PillWidth()
+    {
+        if (_notes.CurrentNote is { } note && _timers.TryGetValue(note.Id, out var timer) && timer.IsActive)
+            return PillTimerWidth;
+        var probe = new TextBlock
+        {
+            Text = PillTitleText(),
+            FontFamily = new FontFamily("Segoe UI Variable Display"),
+            FontSize = 19,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+        };
+        probe.Measure(new global::Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+        return Math.Clamp(22 + probe.DesiredSize.Width + 14 + 28 + 12, PillMinimumWidth, PillMaximumWidth);
+    }
+
+    private string PillTitleText() =>
+        string.IsNullOrWhiteSpace(_notes.CurrentNote?.Title) ? "Untitled" : _notes.CurrentNote!.Title.Trim();
+
+    private HarborCountdown TimerFor(string noteId)
+    {
+        if (_timers.TryGetValue(noteId, out var timer)) return timer;
+        timer = new HarborCountdown(context: SynchronizationContext.Current);
+        timer.Changed += (_, _) => UpdateHarbor();
+        timer.Finished += (_, _) => PlayChime();
+        _timers[noteId] = timer;
+        return timer;
+    }
+
+    /// <summary>The pill's title or countdown, its buttons and width, and the header's countdown.</summary>
+    private void UpdateHarbor()
+    {
+        var note = _notes.CurrentNote;
+        var timer = note is null ? null : _timers.GetValueOrDefault(note.Id);
+        var active = timer?.IsActive == true;
+        var textBrush = ThemeBrushes.Get<Brush>(WindowRoot,
+            WindowRoot.ActualTheme == ElementTheme.Dark ? "TextFillColorPrimaryBrush" : "AccentTextFillColorPrimaryBrush");
+
+        _pillTitle.SetStyle(new FontFamily("Segoe UI Variable Display"), 19, Microsoft.UI.Text.FontWeights.SemiBold, textBrush);
+        _pillTitle.Text = PillTitleText();
+        PillTitleLane.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
+        PillCountdown.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+        PillCountdown.Foreground = textBrush;
+        PillCountdown.Text = timer?.DisplayText ?? "";
+        PillPause.Visibility = PillStop.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+        PillPause.IsEnabled = timer is { IsFinished: false };
+        PillPause.Opacity = PillPause.IsEnabled ? 1 : 0.35;
+        PillPauseGlyph.Glyph = timer?.IsPaused == true ? "\uE768" : "\uE769";
+        var pauseLabel = timer?.IsPaused == true ? "Continue timer" : "Pause timer";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(PillPause, pauseLabel);
+        ToolTipService.SetToolTip(PillPause, pauseLabel);
+
+        // In the panel, a running countdown stands in for the title; at "Time's up" the title comes back.
+        var showCountdown = active && timer is { IsFinished: false };
+        TitleBox.Visibility = showCountdown ? Visibility.Collapsed : Visibility.Visible;
+        TimerTitle.Visibility = showCountdown ? Visibility.Visible : Visibility.Collapsed;
+        TimerTitleText.Text = timer?.DisplayText ?? "";
+
+        // A timer starting or stopping changes the pill's width (Mac: updateMinimizedWidth).
+        if (_minimized)
+        {
+            var scale = Scale();
+            var width = (int)Math.Round(PillWidth() * scale);
+            var target = _windowSpring.Target;
+            if (Math.Abs(width - target.Width) > 1)
+            {
+                Pill.Width = width / scale;
+                _windowSpring.AnimateTo(Clamp(new RectInt32(target.X + (target.Width - width) / 2, target.Y, width, target.Height), WorkArea()));
+            }
+        }
+        UpdateDragRegion();
+    }
+
+    /// <summary>The Mac's TimerComplete chime, converted to WAV; the system beep if it can't play.</summary>
+    private static unsafe void PlayChime()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "Assets", "TimerComplete.wav");
+        var played = File.Exists(path) && global::Windows.Win32.PInvoke.PlaySound(
+            path, default, global::Windows.Win32.Media.Audio.SND_FLAGS.SND_FILENAME
+                | global::Windows.Win32.Media.Audio.SND_FLAGS.SND_ASYNC
+                | global::Windows.Win32.Media.Audio.SND_FLAGS.SND_NODEFAULT);
+        if (!played) global::Windows.Win32.PInvoke.MessageBeep(global::Windows.Win32.UI.WindowsAndMessaging.MESSAGEBOX_STYLE.MB_OK);
+    }
+
+    private void OnTimerTitle(object sender, RoutedEventArgs e) => FoldIntoHarbor();
+    private void OnPillRestore(object sender, RoutedEventArgs e) => RestoreFromHarbor();
+    private void OnPillPause(object sender, RoutedEventArgs e)
+    {
+        if (_notes.CurrentNote is { } note && _timers.TryGetValue(note.Id, out var timer)) timer.TogglePause();
+    }
+    private void OnPillStop(object sender, RoutedEventArgs e)
+    {
+        if (_notes.CurrentNote is { } note && _timers.TryGetValue(note.Id, out var timer)) timer.Stop();
+    }
+
     // MARK: - Commands
 
     /// <summary>
@@ -607,6 +851,7 @@ public sealed partial class MainWindow : Window
         {
             (VirtualKey.N, false) => NewNote,
             (VirtualKey.L, false) => _allNotes.Toggle,
+            (VirtualKey.M, false) => ToggleHarbor,
             (VirtualKey.W, false) => HidePanel,
             (VirtualKey.Enter, false) => CopyNote,
             (VirtualKey.K, false) => ShowLinkDialog,

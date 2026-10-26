@@ -30,3 +30,5 @@ GetWindowThreadProcessId
 AttachThreadInput
 GetCurrentThreadId
 BringWindowToTop
+PlaySound
+MessageBeep

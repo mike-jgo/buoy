@@ -11,6 +11,14 @@ tray icon and global hotkey are plain Win32 (CsWin32) on one hidden window,
 not a tray package. The tray menu has New Note, About and Quit; Sync Now joins
 it in Phase 6.
 
+**Beyond the MVP list:** Harbor Mode and the Harbor Timer are in (yellow light
+and Ctrl+M), as is the Mac's motion. Motion follows the `apple-design` skill
+where it adds to the Mac: the window moves on springs (`WindowSpring`, with
+`Buoy.Core.Motion.Spring`) that re-aim from where they are and keep their
+speed, so spam-toggling Harbor Mode bends instead of jumping, and the restore
+size is only taken from a window at rest. Composition's spring `Period` is the
+oscillation period, the same as SwiftUI's response. Don't divide by 2π.
+
 **The panel follows the Mac's design, not the generic layout first sketched
 here.** Sizes come from the Mac's `ChromeMetrics` (regular density); the
 reference is the live mock on buoy.gabemempin.me. It keeps the Mac's traffic

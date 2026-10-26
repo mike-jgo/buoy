@@ -30,6 +30,7 @@
 
   <ItemGroup>
     <Content Include="Assets\Buoy.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\TimerComplete.wav" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

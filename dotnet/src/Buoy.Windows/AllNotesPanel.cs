@@ -147,7 +147,8 @@ internal sealed class AllNotesPanel : UserControl
         _search.Text = "";
         Rebuild();
         // Fades in (Mac: 0.16s ease-out); a fade is fine under reduced motion too.
-        Motion.SetOpacity(this, 0);
+        // Reopened mid-fade-out, it continues from where it is rather than blinking out first.
+        if (Visibility == Visibility.Collapsed) Motion.SetOpacity(this, 0);
         Visibility = Visibility.Visible;
         Motion.Fade(this, 1, FadeDuration);
         _search.Focus(FocusState.Programmatic);

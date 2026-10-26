@@ -31,9 +31,11 @@ internal static class Motion
 
     /// <summary>
     /// SwiftUI's spring(response:dampingFraction:) as a composition spring. Composition's
-    /// period is 1/ω, while SwiftUI's response is the undamped period 2π/ω.
+    /// Period is "the time for the spring to complete a single oscillation", which is
+    /// what SwiftUI's response means, so it passes straight through. (Dividing by 2π,
+    /// as an earlier version did, made every spring about 6x too fast.)
     /// </summary>
-    public static TimeSpan SpringPeriod(double response) => TimeSpan.FromSeconds(response / (2 * Math.PI));
+    public static TimeSpan SpringPeriod(double response) => TimeSpan.FromSeconds(response);
 
     /// <summary>Fades to <paramref name="opacity"/>, then runs <paramref name="completed"/> on the UI thread.</summary>
     public static void Fade(UIElement element, float opacity, TimeSpan duration, Action? completed = null)
