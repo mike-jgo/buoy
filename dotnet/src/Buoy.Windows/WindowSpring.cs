@@ -82,6 +82,8 @@ internal sealed class WindowSpring
         var seconds = _lastFrame == TimeSpan.Zero ? 1.0 / 60 : (time - _lastFrame).TotalSeconds;
         _lastFrame = time;
         if (seconds <= 0) return;
+        // A slow frame delays the motion a little rather than making the window lurch.
+        seconds = Math.Min(seconds, 1.0 / 30);
 
         _x!.Step(seconds);
         _y!.Step(seconds);

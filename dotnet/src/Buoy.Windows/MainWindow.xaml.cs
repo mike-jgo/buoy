@@ -98,15 +98,10 @@ public sealed partial class MainWindow : Window
 
         // The Mac title has no clear button. WinUI has no switch for a text box's
         // "×", and its visual states only toggle visibility, so shrink it to nothing.
-        TitleBox.Loaded += (_, _) =>
-        {
-            if (FindByName(TitleBox, "DeleteButton") is { } clear)
-            {
-                clear.Width = 0;
-                clear.Opacity = 0;
-                clear.IsHitTestVisible = false;
-            }
-        };
+        TitleBox.Loaded += (_, _) => HideTitleClearButton();
+        // The template can realise the button only on first focus, and its style has a
+        // MinWidth of 34: a centred title then jumped left by half that when selected.
+        TitleBox.GotFocus += (_, _) => HideTitleClearButton();
 
         _editor = new BuoyEditor(EditorBox, notes, settings.Value.FontSize);
         _editor.ContentChanged += (_, _) => UpdateInfo();
@@ -381,6 +376,17 @@ public sealed partial class MainWindow : Window
         batch.Completed += (_, _) => DispatcherQueue.TryEnqueue(() => Effects.Children.Remove(icon));
     }
 
+    private void HideTitleClearButton()
+    {
+        if (FindByName(TitleBox, "DeleteButton") is not Control clear) return;
+        clear.MinWidth = 0;
+        clear.Width = 0;
+        clear.Margin = new Thickness(0);
+        clear.Padding = new Thickness(0);
+        clear.Opacity = 0;
+        clear.IsHitTestVisible = false;
+    }
+
     private static FrameworkElement? FindByName(DependencyObject root, string name)
     {
         for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
@@ -618,8 +624,8 @@ public sealed partial class MainWindow : Window
         if (_minimized) return;
         _allNotes.Close();
         _notes.FlushPendingSaves();
-        if (!_windowSpring.IsMoving) _lastFullFrame = CurrentFrame();
-        var from = CurrentFrame();
+        if (!_windowSpring.IsMoving) _lastFullFrame = DrawnFrame();
+        var from = DrawnFrame();
         _minimized = true;
 
         if (_notes.CurrentNote is { } note) TimerFor(note.Id).Start(note.Title);
@@ -649,12 +655,19 @@ public sealed partial class MainWindow : Window
         Motion.PopIn(Pill, from: 0.96f, anchor: new Vector2(0.5f, bottomAnchored ? 1 : 0), response: 0.3, damping: 1.0);
         PillRestore.Focus(FocusState.Programmatic);
 
-        _windowSpring.AnimateTo(target, () =>
+        // One tick later, after the swap's layout work: started together, that work
+        // took the sweep's opening frame (a 61ms lurch). The Mac defers the same way.
+        var windowTarget = ToWindowFrame(target);
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
             if (!_minimized) return;
-            Root.Visibility = Visibility.Collapsed;
-            Release(Root);
-            UpdateDragRegion();
+            _windowSpring.AnimateTo(windowTarget, () =>
+            {
+                if (!_minimized) return;
+                Root.Visibility = Visibility.Collapsed;
+                Release(Root);
+                UpdateDragRegion();
+            });
         });
         UpdateDragRegion();
     }
@@ -669,7 +682,7 @@ public sealed partial class MainWindow : Window
     {
         if (!_minimized) return;
         _minimized = false;
-        var from = CurrentFrame();
+        var from = DrawnFrame();
         var scale = Scale();
         var area = WorkArea();
         var full = _lastFullFrame ?? new RectInt32(0, 0, (int)(InitialSize.Width * scale), (int)(InitialSize.Height * scale));
@@ -686,18 +699,27 @@ public sealed partial class MainWindow : Window
         Motion.Fade(Pill, 0, TimeSpan.FromSeconds(0.12), () => { if (!_minimized) Pill.Visibility = Visibility.Collapsed; });
         UpdateHarbor();
 
-        _windowSpring.AnimateTo(target, () =>
+        // As on folding: after the panel's layout, which otherwise ate the first frame.
+        var windowTarget = ToWindowFrame(target);
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
             if (_minimized) return;
-            Release(Root);
-            _presenter.IsResizable = true;
-            var s = Scale();
-            _presenter.PreferredMinimumWidth = (int)(MinimumSize.Width * s);
-            _presenter.PreferredMinimumHeight = (int)(MinimumSize.Height * s);
-            UpdateDragRegion();
-            _editor.Focus();
+            _windowSpring.AnimateTo(windowTarget, OnRestored);
         });
         UpdateDragRegion();
+    }
+
+    /// <summary>The window has finished growing back: hand the panel its normal layout.</summary>
+    private void OnRestored()
+    {
+        if (_minimized) return;
+        Release(Root);
+        _presenter.IsResizable = true;
+        var scale = Scale();
+        _presenter.PreferredMinimumWidth = (int)(MinimumSize.Width * scale);
+        _presenter.PreferredMinimumHeight = (int)(MinimumSize.Height * scale);
+        UpdateDragRegion();
+        _editor.Focus();
     }
 
     /// <summary>Pins an element at a fixed size against one edge, so the window can clip it instead of reflowing it.</summary>
@@ -717,7 +739,38 @@ public sealed partial class MainWindow : Window
         element.VerticalAlignment = VerticalAlignment.Stretch;
     }
 
-    private RectInt32 CurrentFrame() => new(AppWindow.Position.X, AppWindow.Position.Y, AppWindow.Size.Width, AppWindow.Size.Height);
+    /// <summary>
+    /// What's drawn of the window, in screen pixels. Windows 10 and 11 give a
+    /// window invisible resize borders (8px left, right and bottom here) that are
+    /// part of its frame but never drawn, even when it can't be resized. Harbor
+    /// sizes and holds work in the drawn area; sizing the frame instead made the
+    /// pill 16px narrower and 8px shorter than its layout (cropped off-centre)
+    /// and the panel restore 16x8px off, then snap.
+    /// </summary>
+    private RectInt32 DrawnFrame()
+    {
+        var size = AppWindow.Size;
+        var client = AppWindow.ClientSize;
+        return new RectInt32(AppWindow.Position.X + (size.Width - client.Width) / 2, AppWindow.Position.Y, client.Width, client.Height);
+    }
+
+    /// <summary>The window frame whose drawn area is <paramref name="drawn"/>.</summary>
+    private RectInt32 ToWindowFrame(RectInt32 drawn)
+    {
+        var size = AppWindow.Size;
+        var client = AppWindow.ClientSize;
+        var horizontal = size.Width - client.Width;
+        return new RectInt32(drawn.X - horizontal / 2, drawn.Y, drawn.Width + horizontal, drawn.Height + size.Height - client.Height);
+    }
+
+    /// <summary>The drawn area of a window frame, using the current border sizes.</summary>
+    private RectInt32 ToDrawnFrame(RectInt32 window)
+    {
+        var size = AppWindow.Size;
+        var client = AppWindow.ClientSize;
+        var horizontal = size.Width - client.Width;
+        return new RectInt32(window.X + horizontal / 2, window.Y, window.Width - horizontal, window.Height - (size.Height - client.Height));
+    }
 
     private RectInt32 WorkArea() => DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
 
@@ -793,11 +846,11 @@ public sealed partial class MainWindow : Window
         {
             var scale = Scale();
             var width = (int)Math.Round(PillWidth() * scale);
-            var target = _windowSpring.Target;
+            var target = ToDrawnFrame(_windowSpring.Target);
             if (Math.Abs(width - target.Width) > 1)
             {
                 Pill.Width = width / scale;
-                _windowSpring.AnimateTo(Clamp(new RectInt32(target.X + (target.Width - width) / 2, target.Y, width, target.Height), WorkArea()));
+                _windowSpring.AnimateTo(ToWindowFrame(Clamp(new RectInt32(target.X + (target.Width - width) / 2, target.Y, width, target.Height), WorkArea())));
             }
         }
         UpdateDragRegion();
