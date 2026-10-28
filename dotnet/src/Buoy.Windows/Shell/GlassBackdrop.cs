@@ -45,6 +45,8 @@ internal sealed class GlassBackdrop : SystemBackdrop
     private SystemComposition.Compositor? _system;
     private ICompositionSupportsSystemBackdrop? _target;
     private SystemComposition.ShapeVisual? _shapes;
+    private SystemComposition.CompositionSpriteShape? _fill;
+    private SystemComposition.CompositionColorBrush? _fillBrush;
     private SystemComposition.CompositionRoundedRectangleGeometry? _mask;
     private SystemComposition.CompositionVisualSurface? _surface;
     private SystemComposition.CompositionSurfaceBrush? _maskBrush;
@@ -87,25 +89,50 @@ internal sealed class GlassBackdrop : SystemBackdrop
     }
 
     /// <summary>
-    /// Fades the glass and its shadow to <paramref name="opacity"/> over
-    /// <paramref name="duration"/>, from wherever they are; at once for zero.
-    /// The mask carries it, so both fade together.
+    /// Scales the glass about its centre to <paramref name="scale"/> (on
+    /// <paramref name="spring"/> when given, else the fade's curve) and fades it
+    /// to <paramref name="opacity"/>, with its shadow, over <paramref name="duration"/>
+    /// from wherever they are; at once for zero. The mask's shape carries both,
+    /// since the blur and the shadow are cut from it. Under reduced motion only
+    /// the fade runs.
     /// </summary>
-    public void Fade(float opacity, TimeSpan duration)
+    public void Present(float opacity, float scale, TimeSpan duration, (double Response, double Damping)? spring = null)
     {
-        if (_shapes is not { } shapes) return;
+        if (_fill is not { } fill || _fillBrush is not { } brush) return;
+        if (Motion.IsReduced) scale = 1;
+        var s = (float)_scale;
+        fill.CenterPoint = new Vector2((float)(Shape.X + Shape.Width / 2), (float)(Shape.Y + Shape.Height / 2)) * s;
+        var color = Color.FromArgb((byte)Math.Round(opacity * 255), 255, 255, 255);
         if (duration <= TimeSpan.Zero)
         {
-            shapes.StopAnimation("Opacity");
-            shapes.Opacity = opacity;
+            fill.StopAnimation("Scale");
+            brush.StopAnimation("Color");
+            fill.Scale = new Vector2(scale);
+            brush.Color = color;
             return;
         }
-        var c = shapes.Compositor;
-        var fade = c.CreateScalarKeyFrameAnimation();
-        // Ease-out, the curve Motion.Fade gives the content, so the two fade as one.
-        fade.InsertKeyFrame(1, opacity, c.CreateCubicBezierEasingFunction(new Vector2(0, 0), new Vector2(0.58f, 1)));
+        var c = fill.Compositor;
+        // Ease-out, the curve Motion.ScaleFade gives the content, so the two move as one.
+        var curve = c.CreateCubicBezierEasingFunction(new Vector2(0, 0), new Vector2(0.58f, 1));
+        if (spring is { } s2)
+        {
+            var bounce = c.CreateSpringVector2Animation();
+            bounce.FinalValue = new Vector2(scale);
+            bounce.DampingRatio = (float)s2.Damping;
+            bounce.Period = Motion.SpringPeriod(s2.Response);
+            fill.StartAnimation("Scale", bounce);
+        }
+        else
+        {
+            var grow = c.CreateVector2KeyFrameAnimation();
+            grow.InsertKeyFrame(1, new Vector2(scale), curve);
+            grow.Duration = duration;
+            fill.StartAnimation("Scale", grow);
+        }
+        var fade = c.CreateColorKeyFrameAnimation();
+        fade.InsertKeyFrame(1, color, curve);
         fade.Duration = duration;
-        shapes.StartAnimation("Opacity", fade);
+        brush.StartAnimation("Color", fade);
     }
 
     /// <summary>
@@ -172,10 +199,11 @@ internal sealed class GlassBackdrop : SystemBackdrop
         var c = _system = new SystemComposition.Compositor();
 
         _mask = c.CreateRoundedRectangleGeometry();
-        var fill = c.CreateSpriteShape(_mask);
-        fill.FillBrush = c.CreateColorBrush(Color.FromArgb(255, 255, 255, 255));
+        _fillBrush = c.CreateColorBrush(Color.FromArgb(255, 255, 255, 255));
+        _fill = c.CreateSpriteShape(_mask);
+        _fill.FillBrush = _fillBrush;
         _shapes = c.CreateShapeVisual();
-        _shapes.Shapes.Add(fill);
+        _shapes.Shapes.Add(_fill);
         _surface = c.CreateVisualSurface();
         _surface.SourceVisual = _shapes;
         _maskBrush = c.CreateSurfaceBrush(_surface);

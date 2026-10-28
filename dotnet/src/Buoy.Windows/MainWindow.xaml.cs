@@ -155,11 +155,18 @@ public sealed partial class MainWindow : Window
     // MARK: - Showing and hiding
 
     /// <summary>
-    /// How long the panel takes to fade in when opened and out when closed: the
-    /// Mac panel is a borderless NSPanel, which AppKit fades on order-in and
-    /// order-out by default.
+    /// How the panel opens and closes. The Mac has no code for this: its panel
+    /// is a plain NSPanel and AppKit's default window animation does it. These
+    /// are measured from a 120fps recording of the Mac app: it opens almost at
+    /// full size and near-opaque at once, then springs the last 1.5% with a
+    /// barely visible overshoot (0.1%, damping ~0.8), settled by ~0.18s; it closes
+    /// with a ~0.1s fade and next to no shrink.
     /// </summary>
-    private static readonly TimeSpan PanelFade = TimeSpan.FromSeconds(0.2);
+    private static readonly TimeSpan PanelOpenFade = TimeSpan.FromSeconds(0.08);
+    private static readonly TimeSpan PanelCloseDuration = TimeSpan.FromSeconds(0.1);
+    private const float PanelOpenFromScale = 0.985f;
+    private const float PanelCloseToScale = 0.995f;
+    private static readonly (double Response, double Damping) PanelOpenSpring = (0.2, 0.8);
 
     /// <summary>Whether the panel is open, or opening; false from the moment it starts to fade out.</summary>
     private bool _shown;
@@ -177,14 +184,14 @@ public sealed partial class MainWindow : Window
             SizeAndCenter();
             _positioned = true;
         }
-        // From nothing when it was hidden; mid-fade-out it turns back from where it is.
-        if (!AppWindow.IsVisible) FadePanel(0, TimeSpan.Zero);
+        // From small and clear when it was hidden; mid-close it turns back from where it is.
+        if (!AppWindow.IsVisible) PresentPanel(0, PanelOpenFromScale, TimeSpan.Zero);
         _shown = true;
         AppWindow.Show(activateWindow: true);
         _transparent.Track(true);
         Activate();
         TakeForeground();
-        FadePanel(1, PanelFade);
+        PresentPanel(1, 1, PanelOpenFade, spring: PanelOpenSpring);
         if (_minimized) PillRestore.Focus(FocusState.Programmatic);
         else _editor.Focus();
     }
@@ -196,20 +203,43 @@ public sealed partial class MainWindow : Window
         _allNotes.Close();
         _notes.FlushPendingSaves();
         _transparent.Track(false);
-        // Hidden once faded, unless it was opened again meanwhile.
-        FadePanel(0, PanelFade, () => { if (!_shown) AppWindow.Hide(); });
+        // Hidden once gone, unless it was opened again meanwhile.
+        PresentPanel(0, PanelCloseToScale, PanelCloseDuration, () => { if (!_shown) AppWindow.Hide(); });
     }
 
-    /// <summary>Fades the whole panel, glass and content, which live in different compositors.</summary>
-    private void FadePanel(float opacity, TimeSpan duration, Action? completed = null)
+    /// <summary>
+    /// Scales the whole panel about the glass's centre and fades it, glass and
+    /// content together, though they live in different compositors.
+    /// </summary>
+    private void PresentPanel(float opacity, float scale, TimeSpan duration,
+        Action? completed = null, (double Response, double Damping)? spring = null)
     {
-        _glass.Fade(opacity, duration);
+        _glass.Present(opacity, scale, duration, spring);
         if (duration <= TimeSpan.Zero)
         {
+            var visual = Motion.VisualOf(WindowRoot);
+            visual.StopAnimation("Scale");
+            visual.Scale = new Vector3(Motion.IsReduced ? 1 : scale, Motion.IsReduced ? 1 : scale, 1);
+            CenterOnGlass(visual);
             Motion.SetOpacity(WindowRoot, opacity);
             completed?.Invoke();
+            return;
         }
-        else Motion.Fade(WindowRoot, opacity, duration, completed);
+        var size = WindowRoot.ActualSize;
+        var glass = _glass.Shape;
+        var anchor = size.X > 0 && size.Y > 0
+            ? new Vector2((float)((glass.X + glass.Width / 2) / size.X), (float)((glass.Y + glass.Height / 2) / size.Y))
+            : Center;
+        if (spring is { } bounce)
+            Motion.SpringScaleFade(WindowRoot, null, scale, opacity, anchor, bounce.Response, bounce.Damping, duration, completed);
+        else
+            Motion.ScaleFade(WindowRoot, null, scale, opacity, anchor, duration, Motion.EaseOut, completed);
+    }
+
+    private void CenterOnGlass(Microsoft.UI.Composition.Visual visual)
+    {
+        var glass = _glass.Shape;
+        visual.CenterPoint = new Vector3((float)(glass.X + glass.Width / 2), (float)(glass.Y + glass.Height / 2), 0);
     }
 
     /// <summary>Lets the window close for real; for quitting.</summary>

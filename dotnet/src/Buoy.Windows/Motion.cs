@@ -115,6 +115,39 @@ internal static class Motion
     }
 
     /// <summary>
+    /// Springs the element's scale to <paramref name="toScale"/> about
+    /// <paramref name="anchor"/> (from <paramref name="fromScale"/> when given)
+    /// while it fades to <paramref name="toOpacity"/> over <paramref name="fade"/>.
+    /// Under reduced motion only the fade runs, as a crossfade of at most 0.12s.
+    /// </summary>
+    public static void SpringScaleFade(
+        UIElement element, float? fromScale, float toScale, float toOpacity, Vector2 anchor,
+        double response, double damping, TimeSpan fade, Action? completed = null)
+    {
+        var visual = VisualOf(element);
+        if (IsReduced)
+        {
+            visual.StopAnimation("Scale");
+            visual.Scale = Vector3.One;
+            Fade(element, toOpacity, fade > Crossfade ? Crossfade : fade, completed);
+            return;
+        }
+        var size = element.ActualSize;
+        visual.CenterPoint = new Vector3(size.X * anchor.X, size.Y * anchor.Y, 0);
+        if (fromScale is { } from)
+        {
+            visual.StopAnimation("Scale");
+            visual.Scale = new Vector3(from, from, 1);
+        }
+        var spring = visual.Compositor.CreateSpringVector3Animation();
+        spring.FinalValue = new Vector3(toScale, toScale, 1);
+        spring.DampingRatio = (float)damping;
+        spring.Period = SpringPeriod(response);
+        visual.StartAnimation("Scale", spring);
+        Fade(element, toOpacity, fade, completed);
+    }
+
+    /// <summary>
     /// A SwiftUI transition on a fixed curve: scale (about <paramref name="anchor"/>,
     /// as fractions of the element's size) and opacity together, from where they
     /// are, or from <paramref name="fromScale"/> when the element is entering
