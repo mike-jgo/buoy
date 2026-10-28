@@ -42,6 +42,7 @@ internal sealed class AllNotesPanel : UserControl
     public bool IsOpen { get; private set; }
 
     private static readonly TimeSpan FadeDuration = TimeSpan.FromSeconds(0.16);
+    private static readonly System.Numerics.Vector2 TopRight = new(1, 0);
 
     /// <summary>Escape in the search field clears it before closing; the window asks so it can leave that to the field.</summary>
     public bool IsSearchField(object? element) => ReferenceEquals(element, _search);
@@ -146,11 +147,14 @@ internal sealed class AllNotesPanel : UserControl
         IsOpen = true;
         _search.Text = "";
         Rebuild();
-        // Fades in (Mac: 0.16s ease-out); a fade is fine under reduced motion too.
-        // Reopened mid-fade-out, it continues from where it is rather than blinking out first.
-        if (Visibility == Visibility.Collapsed) Motion.SetOpacity(this, 0);
+        // Grows out of its top-right corner, under the All Notes button, as it fades in
+        // (Mac: scale 0.92 from .topTrailing with opacity, 0.16s ease-out). Reopened
+        // mid-close, it continues from where it is rather than starting over.
+        var entering = Visibility == Visibility.Collapsed;
+        if (entering) Motion.SetOpacity(this, 0);
         Visibility = Visibility.Visible;
-        Motion.Fade(this, 1, FadeDuration);
+        if (entering) UpdateLayout();
+        Motion.ScaleFade(this, entering ? 0.92f : null, 1, 1, TopRight, FadeDuration, Motion.EaseOut);
         _search.Focus(FocusState.Programmatic);
     }
 
@@ -158,8 +162,9 @@ internal sealed class AllNotesPanel : UserControl
     {
         if (!IsOpen) return;
         IsOpen = false;
-        // Collapse only once faded out, and only if it wasn't reopened meanwhile.
-        Motion.Fade(this, 0, FadeDuration, () => { if (!IsOpen) Visibility = Visibility.Collapsed; });
+        // Collapse only once gone, and only if it wasn't reopened meanwhile.
+        Motion.ScaleFade(this, null, 0.92f, 0, TopRight, FadeDuration, Motion.EaseOut,
+            () => { if (!IsOpen) Visibility = Visibility.Collapsed; });
         Closed?.Invoke();
     }
 

@@ -84,7 +84,9 @@
         </Style>
 
     </Grid.Resources>
-    <Grid x:Name="Root" Padding="6,0,6,6">
+    <!-- The panel, inside the glass: the window is the glass plus a transparent
+         12pt margin (Mac: glassEdgeInset) that holds the shadow. -->
+    <Grid x:Name="Root" Margin="12" Padding="6,0,6,6">
 
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -332,6 +334,8 @@
          pause and stop take its place. The empty part drags the window. -->
     <Grid
         x:Name="Pill"
+        HorizontalAlignment="Left"
+        VerticalAlignment="Top"
         Padding="22,0,12,0"
         AutomationProperties.Name="Harbor Mode"
         ColumnSpacing="8"

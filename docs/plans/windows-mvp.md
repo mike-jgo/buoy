@@ -13,11 +13,30 @@ it in Phase 6.
 
 **Beyond the MVP list:** Harbor Mode and the Harbor Timer are in (yellow light
 and Ctrl+M), as is the Mac's motion. Motion follows the `apple-design` skill
-where it adds to the Mac: the window moves on springs (`WindowSpring`, with
-`Buoy.Core.Motion.Spring`) that re-aim from where they are and keep their
-speed, so spam-toggling Harbor Mode bends instead of jumping, and the restore
-size is only taken from a window at rest. Composition's spring `Period` is the
-oscillation period, the same as SwiftUI's response. Don't divide by 2π.
+where it adds to the Mac. Composition's spring `Period` is the oscillation
+period, the same as SwiftUI's response. Don't divide by 2π.
+
+**The glass moves, not the window.** Resizing a WinUI window every frame
+hitched (~60ms at the start of each fold), so the panel works like the Mac's:
+a borderless, per-pixel transparent window (`Shell/TransparentWindow.cs`) 12pt
+larger than its glass on every side, with the glass drawn inside it
+(`Shell/GlassBackdrop.cs`). Only the system compositor has a host backdrop
+(blurred desktop) brush, so the glass is one Win2D effect brush set as the
+window's system backdrop: tint over blur, masked by an animated rounded
+rectangle, over that shape's shadow with the glass cut out. WinUI content is
+clipped to the same shape, sprung with the same parameters. Harbor Mode never
+resizes the window; the tall size resizes it once (grow first, shrink after)
+and moves the glass per frame. Rules:
+- `WM_NCCALCSIZE` makes the whole window client area. The presenter otherwise
+  keeps re-adding a dialog frame, and a resizable presenter brings back the 8px
+  invisible borders. The glass's edges resize the window through
+  `InputNonClientPointerSource` border regions instead.
+- The margin lets clicks through by toggling `WS_EX_TRANSPARENT | WS_EX_LAYERED`
+  from a 16ms pointer check against `HitRegions` (glass plus the resize band).
+  Windows hit-tests by rectangle, not by pixel. A press in progress keeps
+  the state it began with.
+- The mask is drawn in pixels (DIPs × `RasterizationScale`); only 100% scale
+  has been checked.
 
 **The panel follows the Mac's design, not the generic layout first sketched
 here.** Sizes come from the Mac's `ChromeMetrics` (regular density); the

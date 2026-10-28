@@ -23,6 +23,9 @@ internal static class Motion
     /// <summary>The crossfade that stands in for a movement under reduced motion.</summary>
     public static readonly TimeSpan Crossfade = TimeSpan.FromSeconds(0.12);
 
+    /// <summary>Mac: minimizedTransitionDuration, the Harbor fold and restore, glass and content alike.</summary>
+    public static readonly TimeSpan HarborSweep = TimeSpan.FromSeconds(0.26);
+
     private static readonly UISettings Settings = new();
 
     public static bool IsReduced => !Settings.AnimationsEnabled;
@@ -87,22 +90,70 @@ internal static class Motion
         Fade(element, 1, TimeSpan.FromSeconds(0.15));
     }
 
-    /// <summary>Shrinks the element to <paramref name="to"/> while it fades out (fade only under reduced motion).</summary>
-    public static void PopOut(UIElement element, float to, Vector2 anchor, Action? completed = null)
+    /// <summary>
+    /// Springs the element's scale down to <paramref name="to"/> about
+    /// <paramref name="anchor"/> while it fades out: PopIn's way back, on the same
+    /// spring (Mac: pillPop's removal under pillAnimation). Fade only under reduced motion.
+    /// </summary>
+    public static void PopOut(UIElement element, float to, Vector2 anchor, double response, double damping, Action? completed = null)
     {
         var visual = VisualOf(element);
         var compositor = visual.Compositor;
-        var duration = IsReduced ? Crossfade : TimeSpan.FromSeconds(0.18);
-        if (!IsReduced)
+        if (IsReduced)
+        {
+            Fade(element, 0, Crossfade, completed);
+            return;
+        }
+        var size = element.ActualSize;
+        visual.CenterPoint = new Vector3(size.X * anchor.X, size.Y * anchor.Y, 0);
+        var spring = compositor.CreateSpringVector3Animation();
+        spring.FinalValue = new Vector3(to, to, 1);
+        spring.DampingRatio = (float)damping;
+        spring.Period = SpringPeriod(response);
+        visual.StartAnimation("Scale", spring);
+        Fade(element, 0, TimeSpan.FromSeconds(0.15), completed);
+    }
+
+    /// <summary>
+    /// A SwiftUI transition on a fixed curve: scale (about <paramref name="anchor"/>,
+    /// as fractions of the element's size) and opacity together, from where they
+    /// are, or from <paramref name="fromScale"/> when the element is entering
+    /// afresh. Under reduced motion only the fade runs, as a crossfade of at most
+    /// 0.12s (Mac: BuoyMotion.transition).
+    /// </summary>
+    public static void ScaleFade(
+        UIElement element, float? fromScale, float toScale, float toOpacity, Vector2 anchor,
+        TimeSpan duration, Func<Compositor, CompositionEasingFunction> curve, Action? completed = null)
+    {
+        var visual = VisualOf(element);
+        var compositor = visual.Compositor;
+        var batch = compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
+        if (IsReduced)
+        {
+            visual.StopAnimation("Scale");
+            visual.Scale = Vector3.One;
+            if (duration > Crossfade) duration = Crossfade;
+        }
+        else
         {
             var size = element.ActualSize;
             visual.CenterPoint = new Vector3(size.X * anchor.X, size.Y * anchor.Y, 0);
-            var shrink = compositor.CreateVector3KeyFrameAnimation();
-            shrink.InsertKeyFrame(1, new Vector3(to, to, 1), EaseOut(compositor));
-            shrink.Duration = duration;
-            visual.StartAnimation("Scale", shrink);
+            if (fromScale is { } from)
+            {
+                visual.StopAnimation("Scale");
+                visual.Scale = new Vector3(from, from, 1);
+            }
+            var scale = compositor.CreateVector3KeyFrameAnimation();
+            scale.InsertKeyFrame(1, new Vector3(toScale, toScale, 1), curve(compositor));
+            scale.Duration = duration;
+            visual.StartAnimation("Scale", scale);
         }
-        Fade(element, 0, duration, completed);
+        var fade = compositor.CreateScalarKeyFrameAnimation();
+        fade.InsertKeyFrame(1, toOpacity, curve(compositor));
+        fade.Duration = duration;
+        visual.StartAnimation("Opacity", fade);
+        batch.End();
+        Completed(batch, element, completed);
     }
 
     /// <summary>Springs the element's translation from <paramref name="from"/> to zero.</summary>

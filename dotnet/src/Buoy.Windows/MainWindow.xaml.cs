@@ -1,6 +1,7 @@
 using System.Numerics;
 using Buoy.Core.Documents;
 using Buoy.Core.Harbor;
+using Buoy.Core.Motion;
 using Buoy.Core.Settings;
 using Buoy.Core.Storage;
 using Buoy.Windows.Editor;
@@ -13,23 +14,32 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.Foundation;
 using Windows.Graphics;
 using Windows.System;
 using Windows.UI.Core;
+using Windows.UI.ViewManagement;
 
 namespace Buoy.Windows;
 
 /// <summary>
-/// The floating panel, laid out like the Mac's: borderless (a thin resize
-/// border, no title bar), out of the taskbar and Alt+Tab, optionally always on
-/// top, on thin acrylic glass. It hides rather than closes; only
-/// <see cref="App.Quit"/> closes it.
+/// The floating panel, laid out like the Mac's: glass with rounded corners and
+/// a soft shadow, drawn inside a transparent window a margin larger than it
+/// (the Mac's glassEdgeInset), so Harbor Mode and the tall size move the glass,
+/// not the window. Out of the taskbar and Alt+Tab, optionally always on top.
+/// It hides rather than closes; only <see cref="App.Quit"/> closes it.
 /// </summary>
 public sealed partial class MainWindow : Window
 {
-    /// <summary>The panel's first size in DIPs: the Mac's glass at regular density, plus room for Windows text.</summary>
-    private static readonly SizeInt32 InitialSize = new(316, 400);
-    private static readonly SizeInt32 MinimumSize = new(292, 300);
+    /// <summary>The glass's first size in DIPs (the Mac's at regular density, plus room for Windows text) and its smallest.</summary>
+    private static readonly SizeInt32 InitialGlass = new(300, 392);
+    private static readonly SizeInt32 MinimumGlass = new(292, 292);
+
+    /// <summary>Mac: glassEdgeInset, the transparent margin that holds the shadow, and windowCornerRadius.</summary>
+    private const double GlassInset = 12, GlassRadius = 16;
+
+    /// <summary>How wide the band along the glass's edges that resizes the window is, half inside and half out.</summary>
+    private const double ResizeBand = 8;
     private static readonly TimeSpan ToastDuration = TimeSpan.FromSeconds(2);
 
     private readonly NoteStore _notes;
@@ -39,7 +49,9 @@ public sealed partial class MainWindow : Window
     private readonly AllNotesPanel _allNotes;
     private readonly TrafficLights _lights;
     private bool _expanded;
-    private readonly WindowSpring _windowSpring;
+    private readonly GlassBackdrop _glass = new();
+    private readonly TransparentWindow _transparent;
+    private readonly UISettings _uiSettings = new();
     private readonly DispatcherTimer _toastTimer = new() { Interval = ToastDuration };
     private bool _positioned;
     private bool _closing;
@@ -58,17 +70,22 @@ public sealed partial class MainWindow : Window
         AppWindow.SetIcon(iconPath);
         AppWindow.IsShownInSwitchers = false;
 
-        _windowSpring = new WindowSpring(AppWindow);
         _presenter = OverlappedPresenter.Create();
-        _presenter.SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false);
+        // No frame at all: the glass is the panel. Its edges resize the window
+        // (UpdateDragRegion); a resizable presenter would add 8px invisible borders.
+        _presenter.SetBorderAndTitleBar(hasBorder: false, hasTitleBar: false);
+        _presenter.IsResizable = false;
         _presenter.IsMaximizable = false;
         _presenter.IsMinimizable = false;
         AppWindow.SetPresenter(_presenter);
 
-        if (GlassBackdrop.IsSupported)
-            SystemBackdrop = new GlassBackdrop();
-        else
-            WindowRoot.Background = (Brush)Application.Current.Resources["SolidBackgroundFillColorBaseBrush"];
+        _transparent = new TransparentWindow(Hwnd, DispatcherQueue) { HitRegions = HitRegions };
+        SystemBackdrop = _glass;
+        _glass.ClipContent(WindowRoot);
+        WindowRoot.SizeChanged += (_, _) => OnWindowSized();
+        WindowRoot.ActualThemeChanged += (_, _) => UpdateGlassAppearance();
+        _uiSettings.AdvancedEffectsEnabledChanged += (_, _) => DispatcherQueue.TryEnqueue(UpdateGlassAppearance);
+        UpdateGlassAppearance();
 
         // Alt+F4 hides, like the close button.
         AppWindow.Closing += (_, args) =>
@@ -120,7 +137,7 @@ public sealed partial class MainWindow : Window
             _editor.Focus();
         };
         _allNotes.DeleteRequested += note => DeleteNote(note);
-        _allNotes.Closed += () => { if (AppWindow.IsVisible) _editor.Focus(); };
+        _allNotes.Closed += () => { if (_shown) _editor.Focus(); };
 
         SettingsFlyout.Content = new SettingsPanel(settings, () => QuitRequested?.Invoke(this, EventArgs.Empty));
 
@@ -137,9 +154,19 @@ public sealed partial class MainWindow : Window
 
     // MARK: - Showing and hiding
 
+    /// <summary>
+    /// How long the panel takes to fade in when opened and out when closed: the
+    /// Mac panel is a borderless NSPanel, which AppKit fades on order-in and
+    /// order-out by default.
+    /// </summary>
+    private static readonly TimeSpan PanelFade = TimeSpan.FromSeconds(0.2);
+
+    /// <summary>Whether the panel is open, or opening; false from the moment it starts to fade out.</summary>
+    private bool _shown;
+
     public void TogglePanel()
     {
-        if (AppWindow.IsVisible) HidePanel();
+        if (_shown) HidePanel();
         else ShowPanel();
     }
 
@@ -150,18 +177,39 @@ public sealed partial class MainWindow : Window
             SizeAndCenter();
             _positioned = true;
         }
+        // From nothing when it was hidden; mid-fade-out it turns back from where it is.
+        if (!AppWindow.IsVisible) FadePanel(0, TimeSpan.Zero);
+        _shown = true;
         AppWindow.Show(activateWindow: true);
+        _transparent.Track(true);
         Activate();
         TakeForeground();
+        FadePanel(1, PanelFade);
         if (_minimized) PillRestore.Focus(FocusState.Programmatic);
         else _editor.Focus();
     }
 
     public void HidePanel()
     {
+        if (!_shown) return;
+        _shown = false;
         _allNotes.Close();
         _notes.FlushPendingSaves();
-        AppWindow.Hide();
+        _transparent.Track(false);
+        // Hidden once faded, unless it was opened again meanwhile.
+        FadePanel(0, PanelFade, () => { if (!_shown) AppWindow.Hide(); });
+    }
+
+    /// <summary>Fades the whole panel, glass and content, which live in different compositors.</summary>
+    private void FadePanel(float opacity, TimeSpan duration, Action? completed = null)
+    {
+        _glass.Fade(opacity, duration);
+        if (duration <= TimeSpan.Zero)
+        {
+            Motion.SetOpacity(WindowRoot, opacity);
+            completed?.Invoke();
+        }
+        else Motion.Fade(WindowRoot, opacity, duration, completed);
     }
 
     /// <summary>Lets the window close for real; for quitting.</summary>
@@ -204,10 +252,8 @@ public sealed partial class MainWindow : Window
     private void SizeAndCenter()
     {
         var scale = Scale();
-        _presenter.PreferredMinimumWidth = (int)(MinimumSize.Width * scale);
-        _presenter.PreferredMinimumHeight = (int)(MinimumSize.Height * scale);
-
-        var size = new SizeInt32((int)(InitialSize.Width * scale), (int)(InitialSize.Height * scale));
+        _transparent.MinimumSize = WindowSize(MinimumGlass.Width, MinimumGlass.Height, scale);
+        var size = WindowSize(InitialGlass.Width, InitialGlass.Height, scale);
         // The display the pointer is on: the one being used, not wherever the hidden window began.
         global::Windows.Win32.PInvoke.GetCursorPos(out var pointer);
         var area = DisplayArea.GetFromPoint(new PointInt32(pointer.X, pointer.Y), DisplayAreaFallback.Primary).WorkArea;
@@ -218,39 +264,102 @@ public sealed partial class MainWindow : Window
             size.Height));
     }
 
+    /// <summary>The window, in pixels, around glass of this size in DIPs.</summary>
+    private static SizeInt32 WindowSize(double glassWidth, double glassHeight, double scale) =>
+        new((int)Math.Round((glassWidth + GlassInset * 2) * scale), (int)Math.Round((glassHeight + GlassInset * 2) * scale));
+
     private double Scale() => global::Windows.Win32.PInvoke.GetDpiForWindow(Hwnd) / 96.0;
+
+    /// <summary>The glass when it fills the window inside the margin: the panel at rest.</summary>
+    private Rect PanelShape() => new(
+        GlassInset, GlassInset,
+        Math.Max(0, WindowRoot.ActualWidth - GlassInset * 2), Math.Max(0, WindowRoot.ActualHeight - GlassInset * 2));
+
+    /// <summary>
+    /// The window changed size (first shown, resized from an edge, or grown or
+    /// shrunk around the tall size): at rest, the panel and its glass fill it.
+    /// </summary>
+    private void OnWindowSized()
+    {
+        if (WindowRoot.XamlRoot is null) return;
+        _glass.SetCanvas(new Size(WindowRoot.ActualWidth, WindowRoot.ActualHeight), WindowRoot.XamlRoot.RasterizationScale);
+        if (!_minimized && !_heightAnimating)
+        {
+            Release(Root);
+            _glass.SetShape(PanelShape(), GlassRadius, animate: false);
+        }
+        UpdateDragRegion();
+    }
+
+    /// <summary>Windows' "Transparency effects" off gives an opaque panel, the Mac's Reduce Transparency.</summary>
+    private void UpdateGlassAppearance() =>
+        _glass.SetAppearance(WindowRoot.ActualTheme == ElementTheme.Dark, solid: !_uiSettings.AdvancedEffectsEnabled);
+
+    /// <summary>Where the window takes the pointer, in screen pixels: the glass and the resize band round it.</summary>
+    private IEnumerable<RectInt32> HitRegions()
+    {
+        if (WindowRoot.XamlRoot is null) yield break;
+        var scale = WindowRoot.XamlRoot.RasterizationScale;
+        var band = _minimized ? 0 : ResizeBand / 2;
+        var glass = _glass.Shape;
+        var position = AppWindow.Position;
+        yield return new RectInt32(
+            position.X + (int)Math.Floor((glass.X - band) * scale),
+            position.Y + (int)Math.Floor((glass.Y - band) * scale),
+            (int)Math.Ceiling((glass.Width + band * 2) * scale),
+            (int)Math.Ceiling((glass.Height + band * 2) * scale));
+    }
+
+    private static readonly NonClientRegionKind[] Borders =
+        [NonClientRegionKind.LeftBorder, NonClientRegionKind.TopBorder, NonClientRegionKind.RightBorder, NonClientRegionKind.BottomBorder];
 
     /// <summary>
     /// The control row drags the window, the way a title bar would, between the
-    /// traffic lights and the buttons, from the window's top edge down.
+    /// traffic lights and the buttons; in Harbor Mode the pill does, up to its
+    /// buttons. The glass's edges resize it (the panel only), each side owning
+    /// its two corners.
     /// </summary>
     private void UpdateDragRegion()
     {
         if (WindowRoot.XamlRoot is null) return;
         var scale = WindowRoot.XamlRoot.RasterizationScale;
-        RectInt32 region;
+        RectInt32 Pixels(double x, double y, double width, double height) => new(
+            (int)Math.Round(x * scale), (int)Math.Round(y * scale),
+            (int)Math.Round(Math.Max(0, width) * scale), (int)Math.Round(Math.Max(0, height) * scale));
+        var source = InputNonClientPointerSource.GetForWindowId(AppWindow.Id);
+
         if (_minimized)
         {
-            // The whole pill drags, up to its buttons.
+            var origin = Pill.TransformToVisual(WindowRoot).TransformPoint(default);
             var buttons = new FrameworkElement[] { PillPause, PillStop, PillRestore }
                 .Where(b => b.Visibility == Visibility.Visible)
                 .Select(b => b.TransformToVisual(WindowRoot).TransformPoint(default).X)
-                .DefaultIfEmpty(WindowRoot.ActualWidth)
+                .DefaultIfEmpty(origin.X + Pill.ActualWidth)
                 .Min();
-            region = new RectInt32(0, 0, (int)(buttons * scale), (int)(WindowRoot.ActualHeight * scale));
+            source.SetRegionRects(NonClientRegionKind.Caption, [Pixels(origin.X, origin.Y, buttons - origin.X, Pill.ActualHeight)]);
+            foreach (var kind in Borders) source.SetRegionRects(kind, []);
+            return;
         }
-        else
-        {
-            var left = _lights.TransformToVisual(WindowRoot).TransformPoint(default).X + _lights.ActualWidth;
-            var right = HeaderButtons.TransformToVisual(WindowRoot).TransformPoint(default).X;
-            var bottom = Header.TransformToVisual(WindowRoot).TransformPoint(default).Y + Header.ActualHeight;
-            region = new RectInt32(
-                (int)(left * scale), 0,
-                (int)(Math.Max(0, right - left) * scale), (int)(Math.Max(0, bottom) * scale));
-        }
-        InputNonClientPointerSource.GetForWindowId(AppWindow.Id)
-            .SetRegionRects(NonClientRegionKind.Caption, [region]);
+
+        var left = _lights.TransformToVisual(WindowRoot).TransformPoint(default).X + _lights.ActualWidth;
+        var right = HeaderButtons.TransformToVisual(WindowRoot).TransformPoint(default).X;
+        var top = Header.TransformToVisual(WindowRoot).TransformPoint(default).Y;
+        source.SetRegionRects(NonClientRegionKind.Caption, [Pixels(left, top, right - left, Header.ActualHeight)]);
+
+        var glass = _glass.Shape;
+        var half = ResizeBand / 2;
+        source.SetRegionRects(NonClientRegionKind.LeftBorder, [Pixels(glass.X - half, glass.Y - half, ResizeBand, glass.Height + ResizeBand)]);
+        source.SetRegionRects(NonClientRegionKind.RightBorder, [Pixels(glass.Right - half, glass.Y - half, ResizeBand, glass.Height + ResizeBand)]);
+        source.SetRegionRects(NonClientRegionKind.TopBorder, [Pixels(glass.X + half, glass.Y - half, glass.Width - ResizeBand, ResizeBand)]);
+        source.SetRegionRects(NonClientRegionKind.BottomBorder, [Pixels(glass.X + half, glass.Bottom - half, glass.Width - ResizeBand, ResizeBand)]);
     }
+
+    /// <summary>Mac: animateHeight's 0.15s ease-out.</summary>
+    private static readonly TimeSpan HeightDuration = TimeSpan.FromSeconds(0.15);
+
+    private bool _heightAnimating;
+    private double _heightFrom, _heightTo;
+    private TimeSpan? _heightStart;
 
     /// <summary>
     /// The green light: between the panel's size and a tall one (the Mac's
@@ -258,25 +367,77 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void ToggleExpanded()
     {
+        if (_minimized) return;
         var scale = Scale();
-        var area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
-        var position = AppWindow.Position;
-        var target = _expanded ? InitialSize.Height * scale : Math.Min(780 * scale, area.Y + area.Height - position.Y);
+        var area = WorkArea();
+        var glassTop = AppWindow.Position.Y + _glass.Shape.Y * scale;
+        var target = _expanded ? InitialGlass.Height : Math.Min(780, (area.Y + area.Height - glassTop) / scale - GlassInset);
         _expanded = !_expanded;
-        AnimateHeight((int)target);
+        AnimateGlassHeight(target);
     }
 
     /// <summary>
-    /// Grows or shrinks the window to <paramref name="target"/> pixels with its top
-    /// edge still, on a critically damped spring (response 0.3, close to the Mac's
-    /// 0.25s ease-in-out). Clicking green again mid-way re-aims from where the
-    /// window is and keeps its speed, rather than restarting from rest.
+    /// Grows or shrinks the glass to <paramref name="height"/> DIPs with its top
+    /// edge still, over the Mac's 0.15s ease-out, the panel laid out afresh each
+    /// frame so the footer rides the edge. Clicking green again mid-way turns back
+    /// from where it is. The window resizes once, never per frame: it grows first
+    /// (transparent below the glass) and shrinks once the glass has.
     /// </summary>
-    private void AnimateHeight(int target)
+    private void AnimateGlassHeight(double height)
     {
-        var frame = _windowSpring.Target;
-        _windowSpring.AnimateTo(new RectInt32(frame.X, frame.Y, frame.Width, target));
+        if (Motion.IsReduced && !_heightAnimating)
+        {
+            ResizeWindowToGlass(height);
+            return;
+        }
+        _heightFrom = _glass.Shape.Height;
+        _heightTo = height;
+        _heightStart = null; // set by the first frame, so the whole curve is drawn
+        if (!_heightAnimating)
+        {
+            _heightAnimating = true;
+            Hold(Root, _glass.Shape);
+            CompositionTarget.Rendering += OnHeightFrame;
+        }
+        if (height + GlassInset * 2 > WindowRoot.ActualHeight) ResizeWindowToGlass(height);
     }
+
+    private void OnHeightFrame(object? sender, object e)
+    {
+        if (!_heightAnimating) return;
+        var time = ((RenderingEventArgs)e).RenderingTime;
+        _heightStart ??= time;
+        var progress = (time - _heightStart.Value) / HeightDuration;
+        var height = _heightFrom + (_heightTo - _heightFrom) * CubicBezier.EaseOut.Evaluate(progress);
+
+        var shape = _glass.Shape;
+        shape.Height = height;
+        Root.Height = height;
+        _glass.SetShape(shape, GlassRadius, animate: false);
+        if (progress < 1) return;
+
+        CompositionTarget.Rendering -= OnHeightFrame;
+        _heightAnimating = false;
+        // OnWindowSized hands the panel back its normal layout once the window fits it.
+        if (Math.Abs(_heightTo + GlassInset * 2 - WindowRoot.ActualHeight) > 0.5) ResizeWindowToGlass(_heightTo);
+        else OnWindowSized();
+    }
+
+    /// <summary>Stops the tall-size animation where it is headed, at once.</summary>
+    private void FinishHeightAnimation()
+    {
+        if (!_heightAnimating) return;
+        CompositionTarget.Rendering -= OnHeightFrame;
+        _heightAnimating = false;
+        var shape = _glass.Shape;
+        shape.Height = _heightTo;
+        _glass.SetShape(shape, GlassRadius, animate: false);
+        ResizeWindowToGlass(_heightTo);
+        Release(Root);
+    }
+
+    private void ResizeWindowToGlass(double glassHeight) =>
+        AppWindow.Resize(new SizeInt32(AppWindow.Size.Width, WindowSize(0, glassHeight, Scale()).Height));
 
     private bool _sliding;
 
@@ -533,7 +694,7 @@ public sealed partial class MainWindow : Window
     private void HideToast()
     {
         _toastTimer.Stop();
-        Motion.PopOut(Toast, to: 0.8f, anchor: new Vector2(0.5f, 1));
+        Motion.PopOut(Toast, to: 0.8f, anchor: new Vector2(0.5f, 1), response: 0.34, damping: 0.68);
     }
 
     /// <summary>Shows a lasting message above the note, such as a hotkey that couldn't be registered.</summary>
@@ -597,12 +758,15 @@ public sealed partial class MainWindow : Window
     private const double PillMinimumWidth = 216;
     private const double PillMaximumWidth = 292;
     private const double PillTimerWidth = 246;
-    private static readonly TimeSpan HarborFade = TimeSpan.FromSeconds(0.16);
 
     private readonly Dictionary<string, HarborCountdown> _timers = [];
     private readonly MarqueeText _pillTitle;
     private bool _minimized;
-    private RectInt32? _lastFullFrame;
+    private static readonly Vector2 Center = new(0.5f, 0.5f);
+
+    /// <summary>The glass's size before the fold, to restore to (Mac: lastFullSizeFrame).</summary>
+    private Size? _panelSize;
+    private Rect _pillShape;
 
     private void ToggleHarbor()
     {
@@ -611,165 +775,130 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Folds the panel into the pill (the Mac's enterMinimizedMode). The window
-    /// shrinks on a spring toward the panel's top edge, centred, or its bottom
-    /// edge when the panel sits in the lower third of the screen. The panel
-    /// keeps its size and is clipped as the window closes over it (never reflowed
-    /// per frame), fading out while the pill fades and scales in. Folding again
-    /// mid-restore re-aims the same springs, so spam-toggling bends instead of
-    /// jumping, and the restore size is only ever taken from a window at rest.
+    /// Folds the panel into the pill (the Mac's enterMinimizedMode): the glass
+    /// closes on a spring toward the panel's top edge, centred, or its bottom
+    /// edge when the panel sits in the lower third of the screen, and becomes a
+    /// capsule. The window stays put; only the glass moves, over a panel that
+    /// keeps its layout and fades, while the pill fades and scales in. Folding
+    /// again mid-restore re-aims the same springs.
     /// </summary>
     private void FoldIntoHarbor()
     {
         if (_minimized) return;
         _allNotes.Close();
         _notes.FlushPendingSaves();
-        if (!_windowSpring.IsMoving) _lastFullFrame = DrawnFrame();
-        var from = DrawnFrame();
+        FinishHeightAnimation();
+        var from = _glass.Shape;
+        _panelSize = new Size(from.Width, from.Height);
         _minimized = true;
 
         if (_notes.CurrentNote is { } note) TimerFor(note.Id).Start(note.Title);
 
-        var scale = Scale();
         var area = WorkArea();
-        var bottomAnchored = from.Y + from.Height / 2.0 > area.Y + area.Height * 0.65;
-        var size = new SizeInt32((int)Math.Round(PillWidth() * scale), (int)Math.Round(PillHeight * scale));
-        var target = Clamp(new RectInt32(
-            from.X + (from.Width - size.Width) / 2,
-            bottomAnchored ? from.Y + from.Height - size.Height : from.Y,
-            size.Width, size.Height), area);
+        var middle = AppWindow.Position.Y + (from.Y + from.Height / 2) * Scale();
+        var bottomAnchored = middle > area.Y + area.Height * 0.65;
+        var width = PillWidth();
+        _pillShape = new Rect(
+            from.X + (from.Width - width) / 2,
+            bottomAnchored ? from.Y + from.Height - PillHeight : from.Y,
+            width, PillHeight);
 
-        _presenter.IsResizable = false;
-        _presenter.PreferredMinimumWidth = null;
-        _presenter.PreferredMinimumHeight = null;
+        // Mac: the outgoing panel only fades (the glass closing over it is the
+        // motion); the pill comes in with opacity and scale 0.96. All on one curve.
+        Hold(Root, from);
+        Motion.ScaleFade(Root, null, 1, 0, Center, Motion.HarborSweep, Motion.EaseInOut,
+            () => { if (_minimized) Root.Visibility = Visibility.Collapsed; });
 
-        // The outgoing panel holds its size, pinned to the edge the window keeps.
-        Hold(Root, from.Width / scale, from.Height / scale, bottomAnchored);
-        Motion.Fade(Root, 0, HarborFade);
-
-        Hold(Pill, size.Width / scale, PillHeight, bottomAnchored);
-        if (Pill.Visibility == Visibility.Collapsed) Motion.SetOpacity(Pill, 0);
+        Hold(Pill, _pillShape);
+        var pillEntering = Pill.Visibility == Visibility.Collapsed;
+        if (pillEntering) Motion.SetOpacity(Pill, 0);
         Pill.Visibility = Visibility.Visible;
         UpdateHarbor();
         Pill.UpdateLayout();
-        Motion.PopIn(Pill, from: 0.96f, anchor: new Vector2(0.5f, bottomAnchored ? 1 : 0), response: 0.3, damping: 1.0);
+        Motion.ScaleFade(Pill, pillEntering ? 0.96f : null, 1, 1, Center, Motion.HarborSweep, Motion.EaseInOut);
         PillRestore.Focus(FocusState.Programmatic);
 
-        // One tick later, after the swap's layout work: started together, that work
-        // took the sweep's opening frame (a 61ms lurch). The Mac defers the same way.
-        var windowTarget = ToWindowFrame(target);
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
-        {
-            if (!_minimized) return;
-            _windowSpring.AnimateTo(windowTarget, () =>
-            {
-                if (!_minimized) return;
-                Root.Visibility = Visibility.Collapsed;
-                Release(Root);
-                UpdateDragRegion();
-            });
-        });
+        _glass.SetShape(_pillShape, PillHeight / 2, animate: true);
         UpdateDragRegion();
     }
 
     /// <summary>
     /// Unfolds back to the panel's size from before the fold (the Mac's
     /// exitMinimizedMode): centred on the pill, growing down, or up if it would
-    /// run off the bottom of the screen. The panel is laid out once at its final
-    /// size and revealed by the growing window.
+    /// run off the bottom of the screen. The panel is laid out at its final size
+    /// at once and the growing glass reveals it.
     /// </summary>
     private void RestoreFromHarbor()
     {
         if (!_minimized) return;
         _minimized = false;
-        var from = DrawnFrame();
         var scale = Scale();
         var area = WorkArea();
-        var full = _lastFullFrame ?? new RectInt32(0, 0, (int)(InitialSize.Width * scale), (int)(InitialSize.Height * scale));
-        var x = from.X + (from.Width - full.Width) / 2;
-        var y = from.Y;
-        var growsUp = y + full.Height > area.Y + area.Height;
-        if (growsUp) y = from.Y + from.Height - full.Height;
-        var target = Clamp(new RectInt32(x, y, full.Width, full.Height), area);
+        var position = AppWindow.Position;
+        var full = _panelSize ?? new Size(InitialGlass.Width, InitialGlass.Height);
+        var pill = _pillShape;
+        var x = pill.X + (pill.Width - full.Width) / 2;
+        var y = pill.Y;
+        if (position.Y + (y + full.Height + GlassInset) * scale > area.Y + area.Height) y = pill.Y + pill.Height - full.Height;
 
-        Hold(Root, full.Width / scale, full.Height / scale, growsUp);
-        if (Root.Visibility == Visibility.Collapsed) Motion.SetOpacity(Root, 0);
+        // The glass can only move inside the window. Where the panel won't fit the
+        // window as it is (the pill was dragged low on the screen), move the window
+        // to fit it first, keeping the pill where it is on screen.
+        var size = WindowSize(full.Width, full.Height, scale);
+        var window = Clamp(new RectInt32(
+            position.X + (int)Math.Round((x - GlassInset) * scale),
+            position.Y + (int)Math.Round((y - GlassInset) * scale),
+            size.Width, size.Height), area);
+        var moved = window.X != position.X || window.Y != position.Y || window.Width != AppWindow.Size.Width || window.Height != AppWindow.Size.Height;
+        if (moved)
+        {
+            pill.X += (position.X - window.X) / scale;
+            pill.Y += (position.Y - window.Y) / scale;
+            _pillShape = pill;
+            Hold(Pill, pill);
+            _glass.SetShape(pill, PillHeight / 2, animate: false);
+            AppWindow.MoveAndResize(window);
+        }
+        var target = new Rect(GlassInset, GlassInset, full.Width, full.Height);
+
+        // Laid out at its final size: OnWindowSized releases it if the window changed size.
+        if (moved) Hold(Root, target);
+        else Release(Root);
+        // Mac: the incoming panel grows from 0.7 about its centre as it fades in, so
+        // its controls arrive with the glass rather than being uncovered by it; the
+        // pill leaves the way it came. Turned back mid-fold, the panel only fades up.
+        var panelEntering = Root.Visibility == Visibility.Collapsed;
+        if (panelEntering) Motion.SetOpacity(Root, 0);
         Root.Visibility = Visibility.Visible;
-        Motion.Fade(Root, 1, HarborFade);
-        Motion.Fade(Pill, 0, TimeSpan.FromSeconds(0.12), () => { if (!_minimized) Pill.Visibility = Visibility.Collapsed; });
+        Root.UpdateLayout();
+        Motion.ScaleFade(Root, panelEntering ? 0.7f : null, 1, 1, Center, Motion.HarborSweep, Motion.EaseInOut);
+        Motion.ScaleFade(Pill, null, 0.96f, 0, Center, Motion.HarborSweep, Motion.EaseInOut,
+            () => { if (!_minimized) Pill.Visibility = Visibility.Collapsed; });
         UpdateHarbor();
 
-        // As on folding: after the panel's layout, which otherwise ate the first frame.
-        var windowTarget = ToWindowFrame(target);
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
-        {
-            if (_minimized) return;
-            _windowSpring.AnimateTo(windowTarget, OnRestored);
-        });
-        UpdateDragRegion();
-    }
-
-    /// <summary>The window has finished growing back: hand the panel its normal layout.</summary>
-    private void OnRestored()
-    {
-        if (_minimized) return;
-        Release(Root);
-        _presenter.IsResizable = true;
-        var scale = Scale();
-        _presenter.PreferredMinimumWidth = (int)(MinimumSize.Width * scale);
-        _presenter.PreferredMinimumHeight = (int)(MinimumSize.Height * scale);
+        _glass.SetShape(target, GlassRadius, animate: true);
         UpdateDragRegion();
         _editor.Focus();
     }
 
-    /// <summary>Pins an element at a fixed size against one edge, so the window can clip it instead of reflowing it.</summary>
-    private static void Hold(FrameworkElement element, double width, double height, bool bottom)
+    /// <summary>Pins an element to <paramref name="shape"/> (window DIPs), so the glass can move over it without reflowing it.</summary>
+    private static void Hold(FrameworkElement element, Rect shape)
     {
-        element.Width = width;
-        element.Height = height;
-        element.HorizontalAlignment = HorizontalAlignment.Center;
-        element.VerticalAlignment = bottom ? VerticalAlignment.Bottom : VerticalAlignment.Top;
+        element.HorizontalAlignment = HorizontalAlignment.Left;
+        element.VerticalAlignment = VerticalAlignment.Top;
+        element.Margin = new Thickness(shape.X, shape.Y, 0, 0);
+        element.Width = shape.Width;
+        element.Height = shape.Height;
     }
 
+    /// <summary>Lets the panel fill the glass inside the window's margin again.</summary>
     private static void Release(FrameworkElement element)
     {
         element.Width = double.NaN;
         element.Height = double.NaN;
         element.HorizontalAlignment = HorizontalAlignment.Stretch;
         element.VerticalAlignment = VerticalAlignment.Stretch;
-    }
-
-    /// <summary>
-    /// What's drawn of the window, in screen pixels. Windows 10 and 11 give a
-    /// window invisible resize borders (8px left, right and bottom here) that are
-    /// part of its frame but never drawn, even when it can't be resized. Harbor
-    /// sizes and holds work in the drawn area; sizing the frame instead made the
-    /// pill 16px narrower and 8px shorter than its layout (cropped off-centre)
-    /// and the panel restore 16x8px off, then snap.
-    /// </summary>
-    private RectInt32 DrawnFrame()
-    {
-        var size = AppWindow.Size;
-        var client = AppWindow.ClientSize;
-        return new RectInt32(AppWindow.Position.X + (size.Width - client.Width) / 2, AppWindow.Position.Y, client.Width, client.Height);
-    }
-
-    /// <summary>The window frame whose drawn area is <paramref name="drawn"/>.</summary>
-    private RectInt32 ToWindowFrame(RectInt32 drawn)
-    {
-        var size = AppWindow.Size;
-        var client = AppWindow.ClientSize;
-        var horizontal = size.Width - client.Width;
-        return new RectInt32(drawn.X - horizontal / 2, drawn.Y, drawn.Width + horizontal, drawn.Height + size.Height - client.Height);
-    }
-
-    /// <summary>The drawn area of a window frame, using the current border sizes.</summary>
-    private RectInt32 ToDrawnFrame(RectInt32 window)
-    {
-        var size = AppWindow.Size;
-        var client = AppWindow.ClientSize;
-        var horizontal = size.Width - client.Width;
-        return new RectInt32(window.X + horizontal / 2, window.Y, window.Width - horizontal, window.Height - (size.Height - client.Height));
+        element.Margin = new Thickness(GlassInset);
     }
 
     private RectInt32 WorkArea() => DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
@@ -844,13 +973,12 @@ public sealed partial class MainWindow : Window
         // A timer starting or stopping changes the pill's width (Mac: updateMinimizedWidth).
         if (_minimized)
         {
-            var scale = Scale();
-            var width = (int)Math.Round(PillWidth() * scale);
-            var target = ToDrawnFrame(_windowSpring.Target);
-            if (Math.Abs(width - target.Width) > 1)
+            var width = PillWidth();
+            if (Math.Abs(width - _pillShape.Width) > 0.5)
             {
-                Pill.Width = width / scale;
-                _windowSpring.AnimateTo(ToWindowFrame(Clamp(new RectInt32(target.X + (target.Width - width) / 2, target.Y, width, target.Height), WorkArea())));
+                _pillShape = new Rect(_pillShape.X + (_pillShape.Width - width) / 2, _pillShape.Y, width, _pillShape.Height);
+                Hold(Pill, _pillShape);
+                _glass.SetShape(_pillShape, PillHeight / 2, animate: true);
             }
         }
         UpdateDragRegion();
